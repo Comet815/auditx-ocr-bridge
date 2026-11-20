@@ -1,0 +1,42 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: bridge test (${{ matrix.os }} / py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.12"]
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: 语法检查
+        run: python -m py_compile ocr_adapter.py chunk_big.py
+
+      - name: 自检
+        run: python tests/test_bridge.py
+
+      - name: 分段器在真实大文件上无报错（3.12 只跑一次）
+        if: matrix.python == '3.12' && matrix.os == 'ubuntu-latest'
+        run: |
+          python - <<'PY'
+          # 造一个 1500 行的大文件，确认不崩
+          src = ["from __future__ import annotations", ""]
+          for i in range(120):
+              src.append(f"def f{i}(a, b):")
+              src.append(f"    return a + b + {i}")
+              src.append("")
+          open("big_generated.py", "w").write("\n".join(src))
+          PY
+          python chunk_big.py big_generated.py --out .ci_chunks --no-git

@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.log
+.chunks/
+.test_chunks/
+.ci_chunks/
+_verify_chunks/
+big_generated.py
+.decisions/
+.DS_Store
+Thumbs.db
