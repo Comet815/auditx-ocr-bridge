@@ -140,12 +140,14 @@ def collect_items(src_text: str, max_lines: int = DEFAULT_MAX_LINES):
     items: list[tuple[int, int, str, str | None]] = []
     kids = list(root.children)
 
+    first_unit: int | None = None
     for i, node in enumerate(kids):
         t = node.type
         if t in NEVER_UNITS or t == "attribute_item":
             continue
         s = extended_start(node, kids, i)
         _, e = node_lines(node)
+        n_before = len(items)
         if t == "impl_item":
             if e - s + 1 <= max_lines:
                 tt = node.child_by_field_name("type")
@@ -162,6 +164,13 @@ def collect_items(src_text: str, max_lines: int = DEFAULT_MAX_LINES):
                 .replace("_definition", "")
             items.append((s, e, label, None))
         # 其余顶层节点（macro_invocation 等）不单独成块
+        if len(items) > n_before and first_unit is None:
+            # 前导区基准 = 第一个产出单元的**顶层节点**起点。impl 被拆成员时，
+            # 基准是 impl 行本身——若误取第一个成员的行号，`impl Big {` 会掉进
+            # 前导区被补进每一块：成员块双 impl 头、尾块挂未闭合 impl，
+            # 所有块解析失败（impl-first 文件，2026-11-27 回测发现，
+            # 与 chunk_js/chunk_ts 的 class-first 同源）。
+            first_unit = s
 
     if not items:
         # 退化兜底（同 chunk_js）：顶层语句各自成单元，防静默逃审；
@@ -175,7 +184,8 @@ def collect_items(src_text: str, max_lines: int = DEFAULT_MAX_LINES):
             items.append((s, e, label, None))
     if not items:
         return [], len(src_text.splitlines())
-    preamble_end = min(it[0] for it in items) - 1
+    preamble_end = (first_unit if first_unit is not None
+                    else min(it[0] for it in items)) - 1
     return items, preamble_end
 
 
