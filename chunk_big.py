@@ -36,12 +36,24 @@ from pathlib import Path
 DEFAULT_MAX_LINES = 240
 
 
+def effective_start(node) -> int:
+    """节点真正的起始行 —— 装饰器也算它的。
+
+    Python 3.8+ 起 `FunctionDef.lineno` 指向 `def` 行，**不含装饰器**。
+    直接拿 lineno 当边界会把第一个顶层函数的 `@decorator` 留在前导区，
+    随前导区补进每一块——在别的块里它悬空，粘到下一个语法对象上。
+    解析能过（语法自检抓不住），但模型看到的是被改写的代码。
+    """
+    decos = [d.lineno for d in getattr(node, "decorator_list", []) or []]
+    return min([node.lineno] + decos)
+
+
 def preamble_end(src_text: str) -> int:
     """import / 常量区结束行（第一个顶层 func/class 之前）"""
     tree = ast.parse(src_text)
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            return max(0, node.lineno - 1)
+            return max(0, effective_start(node) - 1)
     return len(src_text.splitlines())
 
 
@@ -54,16 +66,20 @@ def collect_items(src_text: str, max_lines: int = DEFAULT_MAX_LINES):
     items = []
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            items.append((node.lineno, node.end_lineno, node.name, None))
+            items.append((effective_start(node), node.end_lineno, node.name, None))
         elif isinstance(node, ast.ClassDef):
-            size = node.end_lineno - node.lineno + 1
+            c_start = effective_start(node)
+            size = node.end_lineno - c_start + 1
             if size <= max_lines:
-                items.append((node.lineno, node.end_lineno, node.name, None))
+                items.append((c_start, node.end_lineno, node.name, None))
             else:
                 for m in node.body:
                     s = getattr(m, "lineno", None)
                     if not s:
                         continue
+                    # 方法自己的装饰器（@property / @staticmethod …）也要跟着走，
+                    # 否则被切出函数体，模型看到的是裸 def
+                    s = effective_start(m)
                     e = getattr(m, "end_lineno", s)
                     name = getattr(m, "name", "<stmt>")
                     items.append((s, e, name, node.name))
@@ -87,13 +103,22 @@ def merge_items(items, max_lines: int = DEFAULT_MAX_LINES):
     return out
 
 
-def build_chunk(lines, pre_end, s, e, cls) -> str:
-    pre = "\n".join(lines[:pre_end])
-    body = "\n".join(lines[s - 1:e])
+def build_chunk(lines, pre_end, s, e, cls) -> tuple:
+    """→ (块文本, body 在块文件里的起始行号)
+
+    body_start 是行号回映的**唯一真值**。模型看到的是块文件，它报的行号是
+    块文件的绝对行号——所以适配器必须知道 body 落在块文件的第几行。
+    前导区、分隔空行、补出来的 `class X:` 头各占几行，在这里一次算清；
+    在外面再推一遍就会推错（曾经就少算了一个常数，全库行号整体偏移）。
+    """
+    out = list(lines[:pre_end])
+    if out:
+        out.append("")                       # 前导区与 body 之间的空行
     if cls:
-        # 方法块：补 class 头，保持原缩进
-        return f"{pre}\n\nclass {cls}:\n{body}\n"
-    return f"{pre}\n\n{body}\n"
+        out.append(f"class {cls}:")          # 方法块补类头，保持原缩进
+    body_start = len(out) + 1
+    out.extend(lines[s - 1:e])
+    return "\n".join(out) + "\n", body_start
 
 
 def force_rm(p: Path):
@@ -117,6 +142,15 @@ def _git(args, cwd, check=True):
                           capture_output=True, text=True)
 
 
+def looks_like_chunk_dir(p: Path) -> bool:
+    """是分段器自己产出的目录吗（有 manifest 或 chunk_*.py）"""
+    if not p.is_dir():
+        return False
+    if (p / "manifest.json").exists():
+        return True
+    return any(p.glob("chunk_*.py"))
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description="按 AST 切分大 Python 文件，保证每块语法完整")
@@ -126,6 +160,8 @@ def main(argv=None) -> int:
                     help=f"单块行数上限（默认 {DEFAULT_MAX_LINES}）")
     ap.add_argument("--no-git", action="store_true",
                     help="不初始化 git（OCR 的 review 模式需要 git，scan 模式不需要）")
+    ap.add_argument("--force", action="store_true",
+                    help="目标目录已存在且不像分段输出目录时，强制清空重建")
     args = ap.parse_args(argv)
 
     src = Path(args.source).resolve()
@@ -135,6 +171,17 @@ def main(argv=None) -> int:
         return 2
     if out == src.parent:
         print("输出目录不能是源文件所在目录", file=sys.stderr)
+        return 2
+    # --out 会被整体 rmtree，护栏必须比"不是源目录"更强
+    if out in src.parents:
+        print(f"输出目录是源文件的上级目录，拒绝清空: {out}", file=sys.stderr)
+        return 2
+    if out == Path(out.anchor):
+        print(f"输出目录是盘符根目录，拒绝清空: {out}", file=sys.stderr)
+        return 2
+    if out.exists() and not looks_like_chunk_dir(out) and not args.force:
+        print(f"目标目录已存在且不像分段输出目录（没有 manifest.json / chunk_*.py）：\n  {out}\n"
+              "拒绝清空。确认要覆盖请加 --force。", file=sys.stderr)
         return 2
 
     src_text = src.read_text(encoding="utf-8")
@@ -157,11 +204,11 @@ def main(argv=None) -> int:
     manifest = []
     bad = []
     for i, (s, e, label, cls) in enumerate(merged, 1):
-        text = build_chunk(lines, pre_end, s, e, cls)
+        text, body_start = build_chunk(lines, pre_end, s, e, cls)
         try:
             ast.parse(text)
         except SyntaxError as ex:
-            bad.append((i, label, str(ex)))
+            bad.append({"idx": i, "symbol": label, "error": str(ex)})
             continue
         safe = "".join(ch if ch.isalnum() or ch in "_-" else "_"
                        for ch in label.split("+")[0])[:40] or "x"
@@ -176,6 +223,8 @@ def main(argv=None) -> int:
             "n_lines": e - s + 1,
             "symbol": label,
             "class": cls,
+            # 块文件里 body 第一行的行号（含前导区/空行/类头），回映用
+            "body_start": body_start,
             "source": src.name,
         })
 
@@ -190,13 +239,16 @@ def main(argv=None) -> int:
 
     if bad:
         print("\n✗ 有块无法解析，已跳过：", file=sys.stderr)
-        for i, label, err in bad:
-            print(f"   #{i} {label}: {err}", file=sys.stderr)
+        for b in bad:
+            print(f"   #{b['idx']} {b['symbol']}: {b['error']}", file=sys.stderr)
 
     mp = out / "manifest.json"
     mp.write_text(json.dumps(
         {"source": src.name, "source_lines": len(lines),
-         "preamble_lines": pre_end, "chunks": manifest, "failed": len(bad)},
+         "preamble_lines": pre_end, "chunks": manifest,
+         "failed": len(bad),
+         # 明细而不只是计数：README 说 manifest 会标出缺口，那就真标出来
+         "failed_detail": bad},
         ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\nmanifest → {mp}")
     return 0 if not bad else 1

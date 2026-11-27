@@ -38,14 +38,21 @@ SEVERITY_MAP = {
     "info": "INFO",
 }
 
-# OCR 的 category 是自由文本，按关键词归类
+# OCR 的 category 是自由文本，按关键词归类。
+# 中英混排是常态（模型常常用中文写报告），关键词表必须两种语言都收。
 DIMENSION_RULES = [
-    (("security", "injection", "xss", "vuln", "crypto", "auth"), "security"),
-    (("bug", "logic", "correctness", "error", "crash", "race", "concurr"), "logic"),
-    (("performance", "perf", "memory", "slow"), "quality"),
-    (("maintain", "style", "readab", "naming", "duplicate", "complex"), "quality"),
-    (("doc", "comment", "test", "coverage"), "completeness"),
-    (("api", "fit", "requirement", "spec"), "fit"),
+    (("security", "injection", "xss", "vuln", "crypto", "auth",
+      "安全", "注入", "漏洞", "加密", "鉴权", "越权", "敏感信息"), "security"),
+    (("bug", "logic", "correctness", "error", "crash", "race", "concurr",
+      "逻辑", "错误", "缺陷", "崩溃", "异常", "并发", "竞态", "空指针"), "logic"),
+    (("performance", "perf", "memory", "slow",
+      "性能", "内存", "泄漏", "耗时", "慢"), "quality"),
+    (("maintain", "style", "readab", "naming", "duplicate", "complex",
+      "可维护", "风格", "命名", "重复", "复杂", "整洁"), "quality"),
+    (("doc", "comment", "test", "coverage",
+      "文档", "注释", "测试", "覆盖"), "completeness"),
+    (("api", "fit", "requirement", "spec",
+      "接口", "需求", "规格", "适配", "兼容"), "fit"),
 ]
 
 
@@ -91,13 +98,47 @@ def build_evidence(c: dict, session_id: str | None) -> list[dict]:
     return ev
 
 
-def load_chunk_manifest(path: Path) -> dict:
-    """分段清单 → {块文件名: (源起始行, 源结束行)}
+class ChunkManifest(dict):
+    """{块文件名: (源起始行, 源结束行)} + 分段几何信息
+
+    继承 dict 是为了向后兼容：老的调用方当普通映射用，照样能 `m[name]`。
+    额外带两个真值字段：
+      preamble_lines  块文件里前导区占的行数（manifest 顶层字段）
+      body_start      {块文件名: body 第一行在块文件里的行号}
+    行号回映只认这两个，不再靠"块内第 1 行 = body 第 1 行"这种假设——
+    那个假设是错的（前导区、分隔空行、补出来的 class 头都在 body 前面）。
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.preamble_lines: int | None = None
+        self.body_start: dict = {}
+
+    def resolve(self, path: str) -> str | None:
+        """块路径 → manifest 里的键。
+
+        先精确匹配；再退化到 basename —— OCR 常把 path 报成
+        "chunks/chunk_02_x.py" 这种带目录前缀的形式，而 manifest 里存的是
+        裸文件名。块文件名在清单内唯一，所以 basename 兜底是安全的；
+        不兜底就会静默 missed（F10 那类"坑 1 复发"）。
+        """
+        if not path:
+            return None
+        if path in self:
+            return path
+        base = Path(path).name
+        return base if base in self else None
+
+
+def load_chunk_manifest(path: Path) -> ChunkManifest:
+    """分段清单 → ChunkManifest
 
     兼容两种格式：
-      1. chunk_big.py 产出的 dict：{"chunks": [{"file":..., "lines": "128-251"}], ...}
+      1. chunk_big.py 产出的 dict：{"chunks": [{"file":..., "lines": "128-251",
+         "body_start": 27, ...}], "preamble_lines": 25, ...}
       2. 早期直接输出 list：[{"file":..., "lines": "128-251"}, ...]
         （取不到时用 start_line / end_line 字段）
+    老清单没有 body_start 时仍可用，但回映会降级并告警（见 remap_detail）。
     """
     data = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(data, dict):
@@ -107,7 +148,12 @@ def load_chunk_manifest(path: Path) -> dict:
     else:
         entries = []
 
-    m = {}
+    m = ChunkManifest()
+    if isinstance(data, dict):
+        pl = data.get("preamble_lines")
+        if isinstance(pl, int) and pl >= 0:
+            m.preamble_lines = pl
+
     for c in entries:
         if not isinstance(c, dict):
             continue
@@ -129,29 +175,73 @@ def load_chunk_manifest(path: Path) -> dict:
             except (KeyError, TypeError, ValueError):
                 continue
         m[name] = (a, b)
+        bs = c.get("body_start")
+        if isinstance(bs, int) and bs > 0:
+            m.body_start[name] = bs
     return m
 
 
-def remap_lines(comment: dict, manifest: dict) -> tuple:
-    """把块内行号映射回源文件行号。返回 (start, end, 源文件名)。"""
+def remap_detail(comment: dict, manifest) -> tuple:
+    """块内行号 → 源文件行号，返回 (start, end, path, status)。
+
+    status：
+      remapped      正常回映
+      preamble      模型报的是前导区行号（前导区是逐字复制的，源行号相同）
+      header        报在分隔空行 / 补出来的 class 头上 → 钳到 body 首行
+      out-of-range  回映结果落在源文件区间之外（多半是模型幻觉行号）
+      unmatched     manifest 里没有这个块路径（静默跳过的老毛病，现在会计数）
+      legacy        老清单缺 body_start，只能按旧假设回映 —— 不可靠，会告警
+      no-manifest   没启用回映
+    """
     path = comment.get("path") or ""
     s = comment.get("start_line")
     e = comment.get("end_line") or s
-    info = manifest.get(path)
-    if not info or not s:
-        return s, e, path
-    src_start, _src_end = info
-    # 块文件在第 1 行开始就是源文件的 src_start 行
-    offset = src_start - 1
-    return (s + offset, (e + offset) if e else None, path)
+    if not manifest or not s:
+        return s, e, path, "no-manifest"
+    key = manifest.resolve(path) if hasattr(manifest, "resolve") else (
+        path if path in manifest else None)
+    if not key:
+        return s, e, path, "unmatched"
+    info = manifest[key]
+    src_start, src_end = info
+    body_start = getattr(manifest, "body_start", {}).get(key)
+    pre = getattr(manifest, "preamble_lines", None)
+
+    if body_start is None:
+        # 老清单：没有几何信息，只能维持旧公式（等于假设 body 从块第 1 行开始）。
+        # 这个假设已被实测证伪，所以标 legacy 让上层能告警。
+        off = src_start - 1
+        return s + off, (e + off) if e else None, path, "legacy"
+
+    if s < body_start:
+        if pre is not None and s <= pre:
+            return s, min(e, pre) if e else s, path, "preamble"
+        return src_start, src_start if not e else src_start, path, "header"
+
+    off = src_start - body_start
+    ns = s + off
+    ne = (e + off) if e else None
+    if ns < src_start or (ne is not None and ne > src_end):
+        return ns, ne, path, "out-of-range"
+    return ns, ne, path, "remapped"
 
 
-def build_locator_remapped(c: dict, manifest: dict | None,
+def remap_lines(comment: dict, manifest) -> tuple:
+    """把块内行号映射回源文件行号。返回 (start, end, 源文件名)。"""
+    s, e, path, _status = remap_detail(comment, manifest)
+    return s, e, path
+
+
+def build_locator_remapped(c: dict, manifest=None,
                            source_name: str | None = None) -> str:
     if not manifest:
         return build_locator(c)
-    s, e, path = remap_lines(c, manifest)
-    shown = source_name or path
+    s, e, path, status = remap_detail(c, manifest)
+    # --source-name 只在真的命中了 manifest 时生效。对没命中的路径（同一次
+    # 扫描里顺带扫的其他文件、或路径键对不上）一律保留原始文件名，
+    # 否则会张冠李戴：文件名被改写、行号还留着，看起来完全合理。
+    shown = source_name if (source_name and status != "unmatched"
+                            and status != "no-manifest") else path
     if s and e and e != s:
         return f"{shown}:{s}-{e}"
     if s:
@@ -177,6 +267,9 @@ _IDENT_PATTERNS = [
     re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s+is\s+(?:not|never)\s+imported", re.I),
     re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s+is\s+not\s+defined", re.I),
     re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s+is\s+neither\s+imported", re.I),
+    # 中文句式（OCR 在中文语境大量输出中文 claim，README 自己举的例子就是中文）
+    re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:未|没有|缺少|缺失)(?:被)?(?:导入|定义|声明)"),
+    re.compile(r"(?:缺少|未见|未发现)\s*([A-Za-z_][A-Za-z0-9_]*)\s*的?\s*(?:导入|定义|声明)"),
 ]
 # 太常见的英文词，别当符号
 _STOPWIDTH = {
@@ -184,9 +277,13 @@ _STOPWIDTH = {
     "import", "imported", "definition", "class", "function", "helper", "name",
     "critical", "high", "medium", "low", "code", "file", "line", "module",
 }
+# 闸门：这段文字是不是在说"某符号未导入/未定义"。只认英文的话，
+# 中文报告下这个过滤器完全空转（保守方向没错，但等于没过滤）。
 _UNDEF_PAT = re.compile(
     r"(not imported|is never imported|NameError|undefined|"
-    r"neither imported nor defined|missing .{0,40}(class|function|definition))",
+    r"neither imported nor defined|missing .{0,40}(class|function|definition)|"
+    r"未(?:被)?导入|没有(?:被)?导入|未被定义|未定义|没有定义|"
+    r"缺少.{0,12}(?:导入|定义)|缺失.{0,12}(?:导入|定义))",
     re.I,
 )
 
@@ -307,8 +404,17 @@ def dedupe_findings(findings: list) -> tuple:
     return list(best.values()), dropped
 
 
+def _format_locator(s, e, path, source_name=None, use_source_name=False) -> str:
+    shown = source_name if (source_name and use_source_name) else path
+    if s and e and e != s:
+        return f"{shown}:{s}-{e}"
+    if s:
+        return f"{shown}:{s}"
+    return shown
+
+
 def convert(ocr_json: dict, source_file: str | None = None,
-            manifest: dict | None = None,
+            manifest=None,
             source_name: str | None = None,
             source_symbols: set | None = None) -> dict:
     """返回 {findings: [...], stats: {...}}"""
@@ -318,6 +424,16 @@ def convert(ocr_json: dict, source_file: str | None = None,
     findings = []
     dropped_empty_claim = 0
     dropped_artifacts = []
+    remap_stats = {
+        "enabled": manifest is not None,
+        "remapped": 0,       # 正常回映
+        "preamble": 0,       # 报在前导区（源行号相同）
+        "header": 0,         # 报在空行/补出来的 class 头上
+        "out_of_range": 0,   # 回映结果越出源文件区间
+        "legacy": 0,         # 老清单缺 body_start
+        "basename_matched": 0,   # OCR 报了带目录前缀的 path，靠 basename 命中
+        "unmatched_paths": [],   # manifest 里找不到的块路径（去重）
+    }
     for c in comments:
         claim = (c.get("content") or "").strip()
         if not claim:
@@ -332,12 +448,39 @@ def convert(ocr_json: dict, source_file: str | None = None,
                 "claim": claim[:180],
             })
             continue
+
+        if manifest:
+            s, e, path, status = remap_detail(c, manifest)
+            key = manifest.resolve(path) if hasattr(manifest, "resolve") else None
+            if key and key != path:
+                remap_stats["basename_matched"] += 1
+            locator = _format_locator(
+                s, e, path, source_name,
+                status not in ("unmatched", "no-manifest"))
+            if status == "remapped":
+                remap_stats["remapped"] += 1
+            elif status == "preamble":
+                remap_stats["preamble"] += 1
+            elif status == "header":
+                remap_stats["header"] += 1
+            elif status == "out-of-range":
+                remap_stats["out_of_range"] += 1
+            elif status == "legacy":
+                remap_stats["legacy"] += 1
+            elif status == "unmatched":
+                if c.get("path") not in remap_stats["unmatched_paths"]:
+                    remap_stats["unmatched_paths"].append(c.get("path"))
+        else:
+            path = c.get("path") or ""
+            status = "no-manifest"
+            locator = build_locator(c)
+
         findings.append({
             "dimension": map_dimension(c.get("category")),
             "severity": map_severity(c.get("severity")),
             "claim": claim,
             "evidence": build_evidence(c, session_id),
-            "locator": build_locator_remapped(c, manifest, source_name),
+            "locator": locator,
             "quote": (c.get("existing_code") or "").strip(),
             "suggestion": (c.get("suggestion_code") or "").strip(),
             # 溯源（不进账本的额外字段，供人工核查）
@@ -345,10 +488,13 @@ def convert(ocr_json: dict, source_file: str | None = None,
                 "tool": "open-code-review",
                 "session_id": session_id,
                 "file": source_file,
+                # 每条 comment 自己的原始 path，改名/回映前的证据要留得住
+                "ocr_path": c.get("path"),
                 "ocr_severity": c.get("severity"),
                 "ocr_category": c.get("category"),
                 "chunk_line": c.get("start_line"),
-                "remapped": bool(manifest and remap_lines(c, manifest)[0] != c.get("start_line")),
+                "remapped": status in ("remapped", "preamble", "header"),
+                "remap_status": status,
             },
         })
 
@@ -369,6 +515,7 @@ def convert(ocr_json: dict, source_file: str | None = None,
             "dropped_detail": dropped_artifacts,
             "severity_histogram": _hist(f["severity"] for f in findings),
             "dimension_histogram": _hist(f["dimension"] for f in findings),
+            "remap": remap_stats,
         },
     }
 
@@ -406,13 +553,23 @@ def validate(f: dict) -> list[str]:
 # ── 读取 OCR 输出（前面可能混着进度行） ──────────────────────────────────
 
 def load_ocr_json(path: Path) -> dict:
+    """读 OCR 的 JSON 输出，容忍前后夹带的进度/日志行。
+
+    用 raw_decode 从第一个能解析成 dict 的 `{` 开始，解析完即止、不管尾部 ——
+    日志在前（进度行）和日志在后（"Scan complete in 12.3s"）都能吃下。
+    """
     raw = path.read_text(encoding="utf-8", errors="replace")
-    idx = raw.rfind("\n{")
-    if idx < 0:
-        idx = raw.find("{")
-    if idx < 0:
-        raise SystemExit(f"没找到 JSON: {path}")
-    return json.loads(raw[idx:].strip())
+    dec = json.JSONDecoder()
+    idx = raw.find("{")
+    while idx >= 0:
+        try:
+            obj, _end = dec.raw_decode(raw, idx)
+        except json.JSONDecodeError:
+            obj = None
+        if isinstance(obj, dict):
+            return obj
+        idx = raw.find("{", idx + 1)
+    raise SystemExit(f"没找到 JSON: {path}")
 
 
 def main(argv=None) -> int:
@@ -426,7 +583,11 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="OCR → AuditX 适配器")
     ap.add_argument("ocr_json", help="OCR --format json 的输出文件")
     ap.add_argument("--json", action="store_true", help="以 JSON 输出映射结果")
+    ap.add_argument("-o", "--out", metavar="FILE",
+                    help="把映射结果写成 JSON 文件（stdout 保留人类可读摘要）")
     ap.add_argument("--post", metavar="CASE_DIR", help="写进这个审查庭 case 目录")
+    ap.add_argument("--allow-invalid", action="store_true",
+                    help="--post 时校验不过的条目跳过并留痕，而不是整体拒绝入库")
     ap.add_argument("--seat", default="S-OCR1", help="席位 ID（默认 S-OCR1，须已 grant_seat）")
     ap.add_argument("--source-file", help="被审文件名（仅用于溯源记录）")
     ap.add_argument("--chunk-manifest", metavar="JSON",
@@ -452,11 +613,29 @@ def main(argv=None) -> int:
 
     out = convert(data, args.source_file, manifest, args.source_name, symbols)
 
+    # 回映健康度：静默失败是上一版最大的坑（路径对不上就悄悄跳过，没人知道）
+    rs = out["stats"]["remap"]
+    if manifest:
+        if rs["legacy"]:
+            print("⚠️ 分段清单缺 body_start（旧版 chunk_big 产物）。\n"
+                  "   回映会退化为旧公式，行号整体偏移「前导行数+1」。请用新版重新切分。",
+                  file=sys.stderr)
+        if rs["unmatched_paths"]:
+            shown = ", ".join(str(p) for p in rs["unmatched_paths"][:5])
+            print(f"⚠️ {len(rs['unmatched_paths'])} 个块路径不在分段清单里，行号未回映：{shown}",
+                  file=sys.stderr)
+        if rs["out_of_range"]:
+            print(f"⚠️ {rs['out_of_range']} 条回映结果越出源文件区间（疑似模型幻觉行号）",
+                  file=sys.stderr)
+
     # 校验
     problems = []
+    bad_idx = set()
     for i, f in enumerate(out["findings"], 1):
-        for e in validate(f):
-            problems.append(f"[{i}] {e}")
+        errs = validate(f)
+        if errs:
+            bad_idx.add(i)
+            problems.extend(f"[{i}] {e}" for e in errs)
 
     if args.post:
         # 审查庭引擎是私有组件，不随本仓库分发。
@@ -470,9 +649,24 @@ def main(argv=None) -> int:
                 "去掉 --post 可用离线的纯转换模式（输出 JSON，稍后自己入库）。"
             ) from exc
 
+        # fail-closed：坏数据一条都不入库。
+        # 之前是先全量入库、再事后报问题，留下"半批入库 + 异常中断"的账本噪音。
+        if problems and not args.allow_invalid:
+            print("✗ 校验未通过，按 fail-closed 拒绝入库（账本一个字都没写）：", file=sys.stderr)
+            for p in problems:
+                print("  " + p, file=sys.stderr)
+            print("\n修好数据再来，或加 --allow-invalid 跳过坏条目后入库。", file=sys.stderr)
+            out["validation_problems"] = problems
+            out["posted"] = 0
+            return 2
+
         brain = ReviewBrain(Path(args.post))
-        posted = []
-        for f in out["findings"]:
+        posted_ids = {}
+        skipped = []
+        for i, f in enumerate(out["findings"], 1):
+            if i in bad_idx:
+                skipped.append({"locator": f.get("locator"), "reason": "校验未通过"})
+                continue
             ev = [{"kind": e["kind"], "content": e["content"]} for e in f["evidence"]]
             rec = brain.post_finding(
                 seat_id=args.seat,
@@ -484,13 +678,20 @@ def main(argv=None) -> int:
                 quote=f["quote"],
                 suggestion=f["suggestion"],
             )
-            posted.append(rec)
-        out["posted"] = len(posted)
-        out["posted_ids"] = [p.get("payload", {}).get("finding_id") for p in posted]
-        out["findings"] = [dict(f, _posted_id=pid) for f, pid in
-                           zip(out["findings"], out["posted_ids"])]
+            posted_ids[i] = rec.get("payload", {}).get("finding_id")
+        out["posted"] = len(posted_ids)
+        out["posted_ids"] = list(posted_ids.values())
+        if skipped:
+            out["skipped_invalid"] = skipped
+        out["findings"] = [dict(f, _posted_id=posted_ids.get(i))
+                           for i, f in enumerate(out["findings"], 1)]
 
     out["validation_problems"] = problems
+
+    if args.out:
+        op = Path(args.out)
+        op.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"→ 已写入 {op}", file=sys.stderr)
 
     if args.json or args.post:
         print(json.dumps(out, ensure_ascii=False, indent=2))
@@ -500,6 +701,10 @@ def main(argv=None) -> int:
         print(f"comments {st['comments_total']} → 转换 {st['converted']}")
         print(f"严重度: {st['severity_histogram']}")
         print(f"维度:   {st['dimension_histogram']}")
+        if manifest:
+            print(f"回映: 正常 {rs['remapped']} · 前导区 {rs['preamble']} · "
+                  f"类头 {rs['header']} · 越界 {rs['out_of_range']} · "
+                  f"未匹配块 {len(rs['unmatched_paths'])}")
         if problems:
             print("\n⚠️ 校验问题:")
             for p in problems:

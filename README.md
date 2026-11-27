@@ -44,16 +44,28 @@ OCR 的评价口径和账本的口径不一样，硬塞会直接被 schema 拒�
 
 ### 1. 分段后的行号是错的
 
-按 240 行切断 1478 行的文件后，模型报的是"第 5 行"——那是块内第 5 行，不是源文件第 5 行。
-直接入库的后果是：报错位置指向一段无关代码。
+按 240 行切断 1478 行的文件后，模型报的是"第 5 行"——那是**它看到的那个块文件**的第 5 行，
+不是源文件第 5 行。直接入库的后果是：报错位置指向一段无关代码。
 
-`chunk_big.py` 会产出 `manifest.json` 记下每块的原始行号区间，适配器用 `--chunk-manifest`
-把它换算回去。
+关键是要认清模型看到的是什么：块文件 = 前导区 + 分隔空行 + （可能有一个补出来的 `class X:` 头）+ body。
+模型报行号时**不会**帮你减掉前面那些行，它报的就是块文件的绝对行号。
+
+`chunk_big.py` 因此在 `manifest.json` 里给每块记 `body_start`——body 第一行落在块文件的第几行。
+适配器按 `源行 = start_line + (块内行 - body_start)` 回映：
 
 ```powershell
 python chunk_big.py src/big.py --out .chunks
 python ocr_adapter.py ocr.json --json --chunk-manifest .chunks/manifest.json --source-name src/big.py
 ```
+
+**不要在外面自己再推这个偏移。** 前导区、分隔空行、类头各占几行，只有分段器自己知道；
+以前适配器按"块内第 1 行 = body 第 1 行"推，少算了一个常数，导致所有回映行号整体偏移
+`前导行数 + 1`。这个 bug 藏在测试里很久——因为测试断言的就是公式本身（拿实现当真值，循环论证）。
+
+> **实测裁决**（2026-11-27，deepseek-chat 真实扫描）：源文件前导 12 行，
+> `os.system(cmd)` 在源文件第 20 行、块文件第 16 行。模型报 **16**（块文件绝对行号）。
+> 旧公式给 33，正确值 20。现在 `tests/test_bridge.py` 的 F1 组拿**源文件真值**断言，
+> 不再断言公式。
 
 ### 2. 跨块假报
 
@@ -115,6 +127,12 @@ python ocr_adapter.py ocr.json --post cases/case-01 --seat S-OCR1
 
 `--max-lines` 默认 240。太大模型会超时，太小会切碎语义。
 
+> 这三条**只保语法，不保语义**。装饰器是踩过的坑：Python 3.8+ 起 `FunctionDef.lineno`
+> 指向 `def` 行、不含装饰器，早期版本于是把第一个顶层函数的 `@decorator` 留在前导区、
+> 补进每一块（在别的块里悬空、粘到下一个语法对象上），方法自己的 `@property` 又被切丢。
+> 现在两边都用 `effective_start()`（取 `lineno` 与装饰器行的最小值），装饰器始终跟着它装饰的对象走，
+> 前导区永远不含悬空装饰器。
+
 ---
 
 ## 边界（重要）
@@ -124,7 +142,10 @@ python ocr_adapter.py ocr.json --post cases/case-01 --seat S-OCR1
 - **假报过滤只看符号是否定义，看不懂语义。** 模型说的"这个逻辑反了"它一概不管。
 - **不保证覆盖率。** 模型没报的地方就是没报，账本不会告诉你"这里没审到"。
 - **依赖上游 OCR 的输出格式。** `@alibaba-group/open-code-review` 改版可能让映射失配。
-- 中文语境下 `category` 归类靠关键词匹配，会有归错维度的情况（不影响严重度）。
+- **`category` 归类靠关键词匹配**，中英双语都收，仍会有归错维度的情况（不影响严重度）。
+- **行号回映依赖 `manifest.json` 的 `body_start`。** 旧版分段器产出的清单没有这个字段，
+  适配器会降级为旧公式并**明确告警**（`legacy`），不会假装正确。请用同版本 `chunk_big.py` 重新切分。
+  块路径对不上时也不再静默跳过：`stats.remap.unmatched_paths` 会列出来。
 
 ---
 
@@ -132,10 +153,20 @@ python ocr_adapter.py ocr.json --post cases/case-01 --seat S-OCR1
 
 ```powershell
 python -m py_compile ocr_adapter.py chunk_big.py
+python tests/test_bridge.py        # 67 项自检，不依赖 pytest
 python chunk_big.py tests/fixture_big.py --out .test_chunks --no-git
 ```
 
-CI 在 Python 3.11 / 3.12 × Ubuntu / Windows 上跑同样的两步。
+`tests/test_bridge.py` 分十组：
+
+| 组 | 覆盖 |
+|---|---|
+| A | 分段器三条保证（每块可解析 / 带前导区 / 方法块带类头 / 行号单调） |
+| B | 映射、证据转换、假报识别、去重、校验器 |
+| C | 纯转换端到端（含行号回映真值） |
+| D–J | 已修 bug 的回归：装饰器边界、回映边界、中文语义、脏 JSON、输出护栏、fail-closed、`-o` |
+
+CI 在 Python 3.11 / 3.12 × Ubuntu / Windows 上跑 `py_compile` + 全量自检。
 
 ---
 
