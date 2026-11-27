@@ -89,7 +89,7 @@ def truth_line(marker: str) -> int:
 
 def main() -> int:
     sys.path.insert(0, str(HERE))
-    # 集成适配：本仓把 selftest 放在 tests/、chunk_*.py 放在仓根，补一条路径（逻辑未改）
+    # 集成适配：本仓 chunk_*.py 在仓根，补一条路径（逻辑未改）
     sys.path.insert(0, str(CHUNK_JS.parent))
     import chunk_js  # noqa: E402  （同目录导入被测模块做重解析自检）
 
@@ -235,6 +235,20 @@ def main() -> int:
     check("S19 样本符号含类方法名",
           {"login", "Store", "load", "save", "clear", "size", "helper"} <= fgot,
           f"实得 {sorted(fgot)}")
+
+    # 退化兜底：只有 import+const 的文件不能切出 0 块静默逃审
+    with tempfile.TemporaryDirectory() as td3b:
+        dp = Path(td3b) / "plain.js"
+        dp.write_text("import { a } from 'm';\nconst ONLY = 1;\n"
+                      "console.log(ONLY, a);\n", encoding="utf-8")
+        dout = Path(td3b) / ".chunks"
+        r = subprocess.run(
+            [sys.executable, str(CHUNK_JS), str(dp), "--out", str(dout),
+             "--no-git"], capture_output=True, text=True)
+        ok = r.returncode == 0 and len(json.loads(
+            (dout / "manifest.json").read_text("utf-8"))["chunks"]) >= 1
+        check("S20 无单元文件退化成块（不逃审）", ok,
+              f"rc={r.returncode} stderr={r.stderr.strip()[:160]}")
 
     # ── TS 节：chunk_ts 切分 + TS 符号（期望对源文件真值） ─────────────────
     import chunk_ts  # noqa: E402
@@ -411,6 +425,26 @@ def main() -> int:
     check("V8 .vue 符号抽 script 内容",
           {"CONF", "load", "helper", "ref"} <= vsyms,
           f"实得交集 {sorted({'CONF', 'load', 'helper', 'ref'} & vsyms)}")
+
+    # 退化兜底（小凛在昆仑 App.vue 上逼出来的）：script 只有 import+const
+    # 也必须切出块，不能 0 块静默逃审
+    with tempfile.TemporaryDirectory() as td7:
+        pp = Path(td7) / "plain.vue"
+        pp.write_text(
+            "<template><view /></template>\n"
+            "<script setup>\n"
+            "import { ref } from 'vue';\n"
+            "const title = ref('x');\n"
+            "</script>\n", encoding="utf-8")
+        pout = Path(td7) / ".chunks"
+        r = subprocess.run(
+            [sys.executable, str(CHUNK_JS.parent / "chunk_vue.py"), str(pp),
+             "--out", str(pout), "--no-git"],
+            capture_output=True, text=True)
+        ok = r.returncode == 0 and len(json.loads(
+            (pout / "manifest.json").read_text("utf-8"))["chunks"]) >= 1
+        check("V9 只有 import+const 的 .vue 也成块", ok,
+              f"rc={r.returncode} stderr={r.stderr.strip()[:160]}")
 
     print(f"\n通过 {len(PASSES)} · 失败 {len(FAILS)}")
     return 0 if not FAILS else 1
