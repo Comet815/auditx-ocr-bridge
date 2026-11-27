@@ -22,10 +22,16 @@ jobs:
           python-version: ${{ matrix.python }}
 
       - name: 语法检查
-        run: python -m py_compile ocr_adapter.py chunk_big.py
+        run: python -m py_compile ocr_adapter.py chunk_big.py chunk_js.py js_symbols.py
+
+      - name: 安装 JS 解析依赖
+        run: python -m pip install --quiet tree_sitter tree_sitter_javascript
 
       - name: 自检
         run: python tests/test_bridge.py
+
+      - name: JS 分段器自测
+        run: python tests/selftest_js.py chunk_js.py
 
       - name: 分段器在真实大文件上无报错（3.12 只跑一次）
         if: matrix.python == '3.12' && matrix.os == 'ubuntu-latest'

@@ -35,6 +35,13 @@ from pathlib import Path
 
 DEFAULT_MAX_LINES = 240
 
+# 分段契约版本。适配器按 schema 判能不能回映；chunker 名字/版本写进 manifest，
+# 让复核方知道这批块是哪个实现切的、切的是不是同一版规则。
+MANIFEST_SCHEMA = "chunk-manifest/2"
+CHUNKER_NAME = "chunk_big"
+CHUNKER_VERSION = "0.2.0"
+LANGUAGE = "python"
+
 
 def effective_start(node) -> int:
     """节点真正的起始行 —— 装饰器也算它的。
@@ -244,7 +251,10 @@ def main(argv=None) -> int:
 
     mp = out / "manifest.json"
     mp.write_text(json.dumps(
-        {"source": src.name, "source_lines": len(lines),
+        {"schema": MANIFEST_SCHEMA,
+         "source": src.name, "source_lines": len(lines),
+         "language": LANGUAGE,
+         "chunker": {"name": CHUNKER_NAME, "version": CHUNKER_VERSION},
          "preamble_lines": pre_end, "chunks": manifest,
          "failed": len(bad),
          # 明细而不只是计数：README 说 manifest 会标出缺口，那就真标出来

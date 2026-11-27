@@ -515,6 +515,105 @@ def test_blindtest_regression(tmp):
     fake2, _ = A.is_chunk_artifact({"content": claim2}, symbols)
     check("K3 真缺陷不被误杀", not fake2)
 
+    # K4/K5：JS 端到端实测抓到的那条（2026-11-27，昆仑 learn/index.js）
+    # 同一句里混着"未定义"和别的名字，只要有一个名字在文件里找不到就保留
+    js_claim = ("`buildReviews(answers)` is called but not defined in this file/chunk, "
+                "and it relies on `answers` rather than the sanitized `ids`.")
+    js_syms = {"buildReviews", "answers", "ids", "Number"}
+    fake3, why3 = A.is_chunk_artifact({"content": js_claim}, js_syms)
+    check("K4 带参数的裸函数名 + 'but not defined' 也能识别", fake3, why3)
+
+    fake4, _ = A.is_chunk_artifact({"content": js_claim}, {"answers", "ids"})
+    check("K5 缺一个名字就保留（不误杀）", not fake4)
+
+
+def test_manifest_v2(tmp):
+    """L：分段契约 v2（language / chunker / 未知语言拒绝回映）"""
+    print("\n[L] 分段契约 v2")
+    import ocr_adapter as A
+
+    out, dm = write_and_chunk(tmp, "v2", REMARK_SRC, 3)
+    check("L1 manifest 带 schema", dm.get("schema") == "chunk-manifest/2",
+          str(dm.get("schema")))
+    check("L2 manifest 带 language", dm.get("language") == "python",
+          str(dm.get("language")))
+    ch = dm.get("chunker") or {}
+    check("L3 manifest 带 chunker 名与版本",
+          bool(ch.get("name")) and bool(ch.get("version")), str(ch))
+
+    m = A.load_chunk_manifest(out / "manifest.json")
+    check("L4 适配器读到 language / chunker",
+          m.language == "python" and m.chunker.get("name") == "chunk_big",
+          f"{m.language} / {m.chunker}")
+
+    c = dm["chunks"][0]
+    conv = A.convert({"comments": [
+        {"path": c["file"], "start_line": c["body_start"] + 1,
+         "content": "一条断言", "category": "bug"}]}, manifest=m)
+    rs = conv["stats"]["remap"]
+    check("L5 stats 记录语言", rs["language"] == "python", str(rs["language"]))
+
+    bad = A.load_chunk_manifest(out / "manifest.json")
+    bad.language = "rust"
+    _s, _e, _p, st = A.remap_detail(
+        {"path": c["file"], "start_line": c["body_start"] + 1}, bad)
+    check("L6 未知语言拒绝回映", st == "unsupported-language", st)
+    loc = A.build_locator_remapped(
+        {"path": c["file"], "start_line": c["body_start"] + 1},
+        bad, source_name="src/x.rs")
+    check("L7 拒绝回映时不改写文件名", not loc.startswith("src/x.rs"), loc)
+
+
+def test_symbol_dispatch(tmp):
+    """M：符号表按语言分派"""
+    print("\n[M] 符号表分派")
+    import ocr_adapter as A
+
+    check("M1 .py 走内置 ast",
+          len(A.collect_source_symbols(ROOT / "tests" / "fixture_big.py")) > 20)
+
+    js = tmp / "x.js"
+    js.write_text("function f(){ return Number('1') }\n", encoding="utf-8")
+
+    # 缺 js_symbols 时必须明确报错，不能空转。这里用 sys.modules 置 None 模拟缺失
+    # （置 None 会让 import 抛 ImportError），比依赖"文件不存在"更可控。
+    saved = sys.modules.get("js_symbols")
+    sys.modules["js_symbols"] = None
+    msg, ok = "", False
+    try:
+        A.collect_source_symbols(js)
+    except SystemExit as e:
+        msg = str(e)
+        ok = "js_symbols.py" in msg
+    finally:
+        if saved is None:
+            sys.modules.pop("js_symbols", None)
+        else:
+            sys.modules["js_symbols"] = saved
+    check("M2 .js 缺 js_symbols 时明确报错而不是空转", ok, msg[:60])
+
+    # 装得上就走 JS 符号表，且内置全局算"已定义"
+    try:
+        import js_symbols  # noqa: F401
+        have_js = True
+    except ImportError:
+        have_js = False
+    if have_js:
+        syms = A.collect_source_symbols(js)
+        check("M4 .js 走 tree-sitter 抽符号", "f" in syms, str(sorted(syms)[:5]))
+        check("M5 JS 内置全局算已定义", "Number" in syms and "JSON" in syms)
+    else:
+        print("  SKIP M4/M5（未安装 tree-sitter）")
+
+    txt = tmp / "x.txt"
+    txt.write_text("hi\n", encoding="utf-8")
+    ok2 = False
+    try:
+        A.collect_source_symbols(txt)
+    except SystemExit:
+        ok2 = True
+    check("M3 不支持的后缀明确报错", ok2)
+
 
 def main():
     if hasattr(sys.stdout, "reconfigure"):
@@ -532,6 +631,8 @@ def main():
         test_post_failclosed(tmp)
         test_cli_out(tmp)
         test_blindtest_regression(tmp)
+        test_manifest_v2(tmp)
+        test_symbol_dispatch(tmp)
 
     print(f"\n{'=' * 50}")
     print(f"通过 {len(PASSES)} · 失败 {len(FAILS)}")

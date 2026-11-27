@@ -99,19 +99,29 @@ def build_evidence(c: dict, session_id: str | None) -> list[dict]:
     return ev
 
 
+# 能保证 body_start 语义的语言。不在这张表里的一律拒绝回映——
+# 宁可让调用方看到"未回映"，也不能给出一个没人验证过的行号。
+SUPPORTED_LANGUAGES = {"python", "javascript"}
+
+
 class ChunkManifest(dict):
     """{块文件名: (源起始行, 源结束行)} + 分段几何信息
 
     继承 dict 是为了向后兼容：老的调用方当普通映射用，照样能 `m[name]`。
-    额外带两个真值字段：
+    额外带真值字段：
+      schema          分段契约版本（chunk-manifest/2 起有 language/chunker）
+      language        源语言；不认识的语言拒绝回映，不猜
+      chunker         {name, version}，复核方据此知道这批块是哪个实现切的
       preamble_lines  块文件里前导区占的行数（manifest 顶层字段）
       body_start      {块文件名: body 第一行在块文件里的行号}
-    行号回映只认这两个，不再靠"块内第 1 行 = body 第 1 行"这种假设——
-    那个假设是错的（前导区、分隔空行、补出来的 class 头都在 body 前面）。
+    行号回映只认这些，不再靠"块内第 1 行 = body 第 1 行"这种假设。
     """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.schema: str | None = None
+        self.language: str | None = None
+        self.chunker: dict = {}
         self.preamble_lines: int | None = None
         self.body_start: dict = {}
 
@@ -151,6 +161,13 @@ def load_chunk_manifest(path: Path) -> ChunkManifest:
 
     m = ChunkManifest()
     if isinstance(data, dict):
+        m.schema = data.get("schema")
+        lang = data.get("language")
+        if isinstance(lang, str):
+            m.language = lang.strip().lower()
+        ch = data.get("chunker")
+        if isinstance(ch, dict):
+            m.chunker = ch
         pl = data.get("preamble_lines")
         if isinstance(pl, int) and pl >= 0:
             m.preamble_lines = pl
@@ -191,6 +208,7 @@ def remap_detail(comment: dict, manifest) -> tuple:
       header        报在分隔空行 / 补出来的 class 头上 → 钳到 body 首行
       out-of-range  回映结果落在源文件区间之外（多半是模型幻觉行号）
       unmatched     manifest 里没有这个块路径（静默跳过的老毛病，现在会计数）
+      unsupported-language  manifest 声明的语言不在白名单里 → 拒绝回映
       legacy        老清单缺 body_start，只能按旧假设回映 —— 不可靠，会告警
       no-manifest   没启用回映
     """
@@ -203,6 +221,13 @@ def remap_detail(comment: dict, manifest) -> tuple:
         path if path in manifest else None)
     if not key:
         return s, e, path, "unmatched"
+
+    # 语言不认识就别回映。manifest 里有 language 但不在白名单里，
+    # 说明那个 chunker 的 body_start 语义没人验过——猜出来的行号比没有更糟。
+    lang = getattr(manifest, "language", None)
+    if lang and lang not in SUPPORTED_LANGUAGES:
+        return s, e, path, "unsupported-language"
+
     info = manifest[key]
     src_start, src_end = info
     body_start = getattr(manifest, "body_start", {}).get(key)
@@ -241,8 +266,8 @@ def build_locator_remapped(c: dict, manifest=None,
     # --source-name 只在真的命中了 manifest 时生效。对没命中的路径（同一次
     # 扫描里顺带扫的其他文件、或路径键对不上）一律保留原始文件名，
     # 否则会张冠李戴：文件名被改写、行号还留着，看起来完全合理。
-    shown = source_name if (source_name and status != "unmatched"
-                            and status != "no-manifest") else path
+    shown = source_name if (source_name and status not in
+                            ("unmatched", "no-manifest", "unsupported-language")) else path
     if s and e and e != s:
         return f"{shown}:{s}-{e}"
     if s:
@@ -261,9 +286,10 @@ def build_locator_remapped(c: dict, manifest=None,
 #   全文件都没有     → 真缺陷，保留
 
 _IDENT_IN_BACKTICK = re.compile(r"`([A-Za-z_][A-Za-z0-9_]*)")
-# 裸函数名：call() / build_prompt() —— 英文报告里非常常见，不带反引号。
+# 裸函数名：call() / buildReviews(answers) —— 英文报告里非常常见，不带反引号。
+# 允许带参数：JS/Python 里大多数调用都有实参，只认空括号会漏掉大半。
 # 前面不能是点或词字符，免得把 `os.system()` 里的 system 当成顶层符号。
-_CALL_IDENT = re.compile(r"(?<![.\w])([A-Za-z_][A-Za-z0-9_]*)\(\)")
+_CALL_IDENT = re.compile(r"(?<![.\w])([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 # 无引号时的兜底：从典型句式里抠符号名
 _IDENT_PATTERNS = [
     re.compile(r"Missing\s+([A-Za-z_][A-Za-z0-9_]*)\s+(?:class|function|definition)", re.I),
@@ -290,7 +316,9 @@ _STOPWIDTH = {
 _UNDEF_PAT = re.compile(
     r"(not imported|is never imported|NameError|undefined|"
     r"neither imported nor defined|missing .{0,40}(class|function|definition)|"
-    r"(?:is|are)\s+(?:not|never)\s+(?:defined|declared|imported)|"
+    # 英文里主语和"未定义"之间常夹几个词：is called but not defined /
+    # never declared / was not imported。所以不要求 (is|are) 紧邻。
+    r"\b(?:not|never)\s+(?:defined|declared|imported)\b|"
     r"未(?:被)?导入|没有(?:被)?导入|未被定义|未定义|没有定义|"
     r"缺少.{0,12}(?:导入|定义)|缺失.{0,12}(?:导入|定义))",
     re.I,
@@ -331,8 +359,39 @@ def extract_identifiers(claim: str) -> list:
     return [x for x in picked if not (x in seen or seen.add(x))]
 
 
-def collect_source_symbols(src_path: Path) -> set:
-    """完整源文件里出现的所有顶层/类级定义名 + import 名"""
+JS_SUFFIXES = {".js", ".mjs", ".cjs", ".jsx"}
+
+
+def collect_source_symbols(src_path) -> set:
+    """按扩展名分派符号抽取。
+
+    语言不对就别硬抽：符号表错了，假报过滤器要么误杀真 bug、要么空转。
+    2026-11-27 盲测那条 `call()` 漏网，根因就是"闸门对了、符号抽取不对"。
+    不认识的后缀直接报错，不猜。
+    """
+    p = Path(src_path)
+    suffix = p.suffix.lower()
+    if suffix == ".py":
+        return _collect_python_symbols(p)
+    if suffix in JS_SUFFIXES:
+        try:
+            from js_symbols import collect_js_symbols  # type: ignore
+        except ImportError as exc:
+            raise SystemExit(
+                f"--source 指向 {p.name}，需要 JS 符号表抽取器 js_symbols.py，但它不在 PYTHONPATH 里。\n"
+                "Python 的 ast 抽不出 JS 符号；没有它，跨块假报过滤会空转——"
+                "宁可明确报错，也不假装过滤过。"
+            ) from exc
+        return collect_js_symbols(p)
+    raise SystemExit(
+        f"--source 不支持的语言：{p.name}（{suffix or '无扩展名'}）。"
+        "目前支持 .py（内置）与 .js/.mjs/.cjs/.jsx（需 js_symbols.py）。"
+    )
+
+
+def _collect_python_symbols(src_path: Path) -> set:
+    """Python：完整源文件里出现的所有顶层/类级定义名 + import 名"""
+    src_path = Path(src_path)
     text = src_path.read_text(encoding="utf-8", errors="replace")
     names = set()
     try:
@@ -447,11 +506,14 @@ def convert(ocr_json: dict, source_file: str | None = None,
     dropped_artifacts = []
     remap_stats = {
         "enabled": manifest is not None,
+        "language": getattr(manifest, "language", None) if manifest else None,
+        "chunker": getattr(manifest, "chunker", {}) if manifest else {},
         "remapped": 0,       # 正常回映
         "preamble": 0,       # 报在前导区（源行号相同）
         "header": 0,         # 报在空行/补出来的 class 头上
         "out_of_range": 0,   # 回映结果越出源文件区间
         "legacy": 0,         # 老清单缺 body_start
+        "unsupported_language": 0,   # 语言不在白名单，拒绝回映
         "basename_matched": 0,   # OCR 报了带目录前缀的 path，靠 basename 命中
         "unmatched_paths": [],   # manifest 里找不到的块路径（去重）
     }
@@ -477,7 +539,7 @@ def convert(ocr_json: dict, source_file: str | None = None,
                 remap_stats["basename_matched"] += 1
             locator = _format_locator(
                 s, e, path, source_name,
-                status not in ("unmatched", "no-manifest"))
+                status not in ("unmatched", "no-manifest", "unsupported-language"))
             if status == "remapped":
                 remap_stats["remapped"] += 1
             elif status == "preamble":
@@ -488,6 +550,8 @@ def convert(ocr_json: dict, source_file: str | None = None,
                 remap_stats["out_of_range"] += 1
             elif status == "legacy":
                 remap_stats["legacy"] += 1
+            elif status == "unsupported-language":
+                remap_stats["unsupported_language"] += 1
             elif status == "unmatched":
                 if c.get("path") not in remap_stats["unmatched_paths"]:
                     remap_stats["unmatched_paths"].append(c.get("path"))

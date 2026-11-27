@@ -18,10 +18,16 @@ OCR 评论  →  [映射]  →  [行号回映]  →  [假报过滤]  →  [去�
 | 文件 | 作用 |
 |---|---|
 | `ocr_adapter.py` | OCR 的 JSON 输出 → 账本事件参数（映射、证据转换、行号回映、假报过滤、去重） |
-| `chunk_big.py` | 按 AST 切分大 Python 文件，保证每块语法完整（避免审查模型把"缺 import"当成真缺陷） |
+| `chunk_big.py` | 按 AST 切分大 **Python** 文件，保证每块语法完整（避免审查模型把"缺 import"当成真缺陷） |
+| `chunk_js.py` | 按 tree-sitter 语法树切分大 **JavaScript** 文件，同一套契约（`chunk-manifest/2`） |
+| `js_symbols.py` | JS 符号表抽取（给跨块假报过滤器用；Python 侧对应的是内置 ast 抽取） |
 
 **审查庭引擎本身（`review_brain_v2.py`）不在这个仓库里**，它是私有组件。
-本仓库是纯转换层：不带 `--post` 时零第三方依赖、零私有依赖。
+本仓库是纯转换层：不带 `--post` 时不需要私有依赖。
+
+依赖：纯转换模式零依赖；**JS 分段需要 `tree_sitter` 与 `tree_sitter_javascript`**
+（`pip install tree_sitter tree_sitter_javascript`，都有现成 wheel，无需编译）。
+没有装这两个包时，Python 侧一切照常，`.js` 会明确报错而不是静默降级。
 
 ---
 
@@ -108,6 +114,26 @@ python ocr_adapter.py ocr.json --json `
   --source src/big.py --source-name src/big.py
 ```
 
+### JavaScript
+
+同一套契约，只换分段器与符号表：
+
+```powershell
+pip install tree_sitter tree_sitter_javascript
+python chunk_js.py src/index.js --out .chunks --no-git
+ocr scan --path .chunks/chunk_02_submit.js --format json -o ocr.json
+python ocr_adapter.py ocr.json --json `
+  --chunk-manifest .chunks/manifest.json `
+  --source src/index.js --source-name index.js
+```
+
+`--source` 按后缀自动选符号表：`.py` 用内置 ast，`.js/.mjs/.cjs/.jsx` 用 `js_symbols.py`。
+JS 符号表包含语言内置全局（`Number`/`JSON`/`Object`…），否则提到内置对象的断言
+永远满足不了"全部符号已定义"，跨块假报就过滤不掉。
+
+分段器验收（切分 / 契约字段 / 块可解析 / `body_start` 几何真值）：
+`python qa/regress_chunker.py --cmd "python chunk_js.py" --target <目录> --ext .js`
+
 ### 直接写进账本
 
 ```powershell
@@ -137,9 +163,11 @@ python ocr_adapter.py ocr.json --post cases/case-01 --seat S-OCR1
 
 ## 边界（重要）
 
-- **分段与行号回映目前仅支持 Python。** `chunk_big.py` 按 Python AST 切分；JS / TS 或任何
-  其他语言只能整文件喂给 OCR，**没有 manifest，也就没有行号回映**。这类项目仍然可以用本桥
-  做格式转换与去重，但 locator 里是文件自身的行号，别把它当成"已映射到源文件"。
+- **分段与行号回映目前支持 Python 与 JavaScript**（`.js/.mjs/.cjs/.jsx`）。
+  其他语言只能整文件喂给 OCR，**没有 manifest，也就没有行号回映**。
+  `.vue` 单文件组件、TypeScript 语法**暂不支持**——前者要先抽 `<script>`，后者要换语法库，
+  都属于尚未实现的部分，别当成本桥能做。
+  遇到不认识的 `language`，适配器会**明确拒绝回映**（`status=unsupported-language`），不猜。
 - **这个桥不判断对错。** 它只做格式转换和去重。上游模型报错了，账本里就是一条错误的缺陷记录——
   只是这条错误记录是**可追溯、可质证、可被复核出来的**。
 - **假报过滤只看符号是否定义，看不懂语义。** 模型说的"这个逻辑反了"它一概不管。
