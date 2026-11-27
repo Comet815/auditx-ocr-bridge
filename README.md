@@ -21,15 +21,17 @@ OCR 评论  →  [映射]  →  [行号回映]  →  [假报过滤]  →  [去�
 | `chunk_big.py` | 按 AST 切分大 **Python** 文件，保证每块语法完整（避免审查模型把"缺 import"当成真缺陷） |
 | `chunk_ts.py` | 按 tree-sitter 切分大 **TypeScript** 文件（`.ts/.tsx/.mts/.cts`，JSX 走 tsx 语法） |
 | `chunk_vue.py` | 切分 `.vue` 单文件组件：抽 `<script>` 后按脚本切，行号回映到 **.vue 坐标** |
+| `chunk_go.py` | 按 tree-sitter 切分 **Go** 文件（前导区含 `package` 子句，method 带 receiver 标签） |
+| `chunk_rust.py` | 按 tree-sitter 切分 **Rust** 文件（`impl` 块补头补尾，属性并入被修饰项） |
 | `js_symbols.py` | JS/TS/Vue 符号表抽取（给跨块假报过滤器用；Python 侧对应的是内置 ast 抽取） |
+| `go_symbols.py` / `rust_symbols.py` | Go / Rust 符号表抽取（同上，按后缀分派） |
 
 **审查庭引擎本身（`review_brain_v2.py`）不在这个仓库里**，它是私有组件。
 本仓库是纯转换层：不带 `--post` 时不需要私有依赖。
 
-依赖：纯转换模式零依赖；**JS / TS / Vue 分段需要 `tree_sitter`、
-`tree_sitter_javascript`、`tree_sitter_typescript`**
-（`pip install tree_sitter tree_sitter_javascript tree_sitter_typescript`，都有现成 wheel，无需编译）。
-没有装这些包时，Python 侧一切照常，对应语言的 `.js/.ts/.vue` 会明确报错而不是静默降级。
+依赖：纯转换模式零依赖；**JS / TS / Vue / Go / Rust 分段需要 tree-sitter 及各语言 grammar**
+（`pip install tree_sitter tree_sitter_javascript tree_sitter_typescript tree_sitter_go tree_sitter_rust`，
+都有现成 wheel，无需编译）。没有装这些包时，Python 侧一切照常，对应语言的源文件会明确报错而不是静默降级。
 
 ---
 
@@ -165,11 +167,14 @@ python ocr_adapter.py ocr.json --post cases/case-01 --seat S-OCR1
 
 ## 边界（重要）
 
-- **分段与行号回映目前支持 Python / JavaScript / TypeScript / Vue 单文件组件**。
+- **分段与行号回映目前支持 Python / JavaScript / TypeScript / Vue SFC / Go / Rust**。
   其他语言只能整文件喂给 OCR，**没有 manifest，也就没有行号回映**。
   `.vue` 只切**第一个** `<script>` 块，第二个块会在 stderr 与 manifest 的 `warnings` 里
   写明行号区间——这是有意的：不静默丢弃，也不假装审过。
   遇到不认识的 `language`，适配器会**明确拒绝回映**（`status=unsupported-language`），不猜。
+- **Go / Rust 只做过语法层与开源项目真实文件的验收**，没有客户项目数据（2026-11-27）。
+  真实样本：Go 标准库 `strings.go`（1304 行 → 7 块）、ripgrep `defs.rs`（8153 行 → 37 块），
+  几何真值与逐块重解析均通过。别把这条读成"已在客户 Go/Rust 项目上跑过"。
 - **这个桥不判断对错。** 它只做格式转换和去重。上游模型报错了，账本里就是一条错误的缺陷记录——
   只是这条错误记录是**可追溯、可质证、可被复核出来的**。
 - **假报过滤只看符号是否定义，看不懂语义。** 模型说的"这个逻辑反了"它一概不管。

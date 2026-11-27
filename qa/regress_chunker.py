@@ -80,6 +80,17 @@ def parse_ok(text: str, language: str) -> tuple[bool, str]:
             return True, ""
         return False, "JS/TS 语法都解析不了"
 
+    if language in ("go", "rust"):
+        mod_name = {"go": "tree_sitter_go", "rust": "tree_sitter_rust"}[language]
+        try:
+            from tree_sitter import Language, Parser
+            mod = __import__(mod_name)
+        except ImportError as ex:
+            return True, f"跳过（缺 {mod_name}：{ex}）"
+        tree = Parser(Language(mod.language())).parse(data)
+        return (not tree.root_node.has_error), ("tree-sitter 报语法错误"
+                                                if tree.root_node.has_error else "")
+
     return True, f"跳过（未知语言 {language}）"
 
 

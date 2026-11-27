@@ -554,7 +554,7 @@ def test_manifest_v2(tmp):
     check("L5 stats 记录语言", rs["language"] == "python", str(rs["language"]))
 
     # 已支持的语言共用同一套 body_start 语义，都能正常回映
-    for lang in ("javascript", "typescript", "vue"):
+    for lang in ("javascript", "typescript", "vue", "go", "rust"):
         ml = A.load_chunk_manifest(out / "manifest.json")
         ml.language = lang
         _s, _e, _p, stl = A.remap_detail(
@@ -562,14 +562,14 @@ def test_manifest_v2(tmp):
         check(f"L8 {lang} 允许回映", stl == "remapped", stl)
 
     bad = A.load_chunk_manifest(out / "manifest.json")
-    bad.language = "rust"
+    bad.language = "cobol"    # 真正不认识的（rust 已支持，别再拿它当反例）
     _s, _e, _p, st = A.remap_detail(
         {"path": c["file"], "start_line": c["body_start"] + 1}, bad)
     check("L6 未知语言拒绝回映", st == "unsupported-language", st)
     loc = A.build_locator_remapped(
         {"path": c["file"], "start_line": c["body_start"] + 1},
-        bad, source_name="src/x.rs")
-    check("L7 拒绝回映时不改写文件名", not loc.startswith("src/x.rs"), loc)
+        bad, source_name="src/x.cob")
+    check("L7 拒绝回映时不改写文件名", not loc.startswith("src/x.cob"), loc)
 
 
 def test_symbol_dispatch(tmp):
@@ -621,6 +621,23 @@ def test_symbol_dispatch(tmp):
     except SystemExit:
         ok2 = True
     check("M3 不支持的后缀明确报错", ok2)
+
+    # Go / Rust 分派（各自独立模块，缺了就明确报错，不空转）
+    go = tmp / "x.go"
+    go.write_text("package p\n\nfunc Load(a int) int { return a }\n", encoding="utf-8")
+    try:
+        gsyms = A.collect_source_symbols(go)
+        check("M6 .go 走 go_symbols", "Load" in gsyms, str(sorted(gsyms)[:6]))
+    except SystemExit as e:
+        check("M6 .go 走 go_symbols", False, str(e)[:60])
+
+    rs = tmp / "x.rs"
+    rs.write_text("fn make(n: usize) -> usize { n }\n", encoding="utf-8")
+    try:
+        rsyms = A.collect_source_symbols(rs)
+        check("M7 .rs 走 rust_symbols", "make" in rsyms, str(sorted(rsyms)[:6]))
+    except SystemExit as e:
+        check("M7 .rs 走 rust_symbols", False, str(e)[:60])
 
 
 def test_js_trailing_comment(tmp):

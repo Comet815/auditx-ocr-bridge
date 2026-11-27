@@ -22,10 +22,10 @@ jobs:
           python-version: ${{ matrix.python }}
 
       - name: 语法检查
-        run: python -m py_compile ocr_adapter.py chunk_big.py chunk_js.py chunk_ts.py chunk_vue.py js_symbols.py
+        run: python -m py_compile ocr_adapter.py chunk_big.py chunk_js.py chunk_ts.py chunk_vue.py chunk_go.py chunk_rust.py js_symbols.py go_symbols.py rust_symbols.py
 
-      - name: 安装 JS/TS 解析依赖
-        run: python -m pip install --quiet tree_sitter tree_sitter_javascript tree_sitter_typescript
+      - name: 安装解析依赖
+        run: python -m pip install --quiet tree_sitter tree_sitter_javascript tree_sitter_typescript tree_sitter_go tree_sitter_rust
 
       - name: 自检
         run: python tests/test_bridge.py
@@ -43,6 +43,8 @@ jobs:
           python qa/regress_chunker.py --cmd "python chunk_ts.py"  --target tests/fixtures/ts     --ext .ts  --max-lines 20
           python qa/regress_chunker.py --cmd "python chunk_ts.py"  --target tests/fixtures/ts     --ext .tsx --max-lines 20
           python qa/regress_chunker.py --cmd "python chunk_vue.py" --target tests/fixtures/vue    --ext .vue --max-lines 20
+          python qa/regress_chunker.py --cmd "python chunk_go.py"  --target tests/fixtures/go     --ext .go  --max-lines 20
+          python qa/regress_chunker.py --cmd "python chunk_rust.py" --target tests/fixtures/rust  --ext .rs  --max-lines 20
 
       - name: 分段器在真实大文件上无报错（3.12 只跑一次）
         if: matrix.python == '3.12' && matrix.os == 'ubuntu-latest'

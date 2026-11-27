@@ -102,7 +102,7 @@ def build_evidence(c: dict, session_id: str | None) -> list[dict]:
 # 能保证 body_start 语义的语言。不在这张表里的一律拒绝回映——
 # 宁可让调用方看到"未回映"，也不能给出一个没人验证过的行号。
 # vue 的 start_line 是 .vue 文件坐标（chunker 负责换算），所以回映公式不变。
-SUPPORTED_LANGUAGES = {"python", "javascript", "typescript", "vue"}
+SUPPORTED_LANGUAGES = {"python", "javascript", "typescript", "vue", "go", "rust"}
 
 
 class ChunkManifest(dict):
@@ -362,6 +362,8 @@ def extract_identifiers(claim: str) -> list:
 
 JS_SUFFIXES = {".js", ".mjs", ".cjs", ".jsx",
                ".ts", ".tsx", ".mts", ".cts", ".vue"}
+GO_SUFFIXES = {".go"}
+RUST_SUFFIXES = {".rs"}
 
 
 def collect_source_symbols(src_path) -> set:
@@ -375,19 +377,33 @@ def collect_source_symbols(src_path) -> set:
     suffix = p.suffix.lower()
     if suffix == ".py":
         return _collect_python_symbols(p)
+
+    external = None
     if suffix in JS_SUFFIXES:
+        external = ("js_symbols", "collect_js_symbols",
+                    ".js/.mjs/.cjs/.jsx/.ts/.tsx/.mts/.cts/.vue")
+    elif suffix in GO_SUFFIXES:
+        external = ("go_symbols", "collect_go_symbols", ".go")
+    elif suffix in RUST_SUFFIXES:
+        external = ("rust_symbols", "collect_rust_symbols", ".rs")
+
+    if external:
+        mod_name, fn_name, supported = external
         try:
-            from js_symbols import collect_js_symbols  # type: ignore
+            mod = __import__(mod_name)
         except ImportError as exc:
             raise SystemExit(
-                f"--source 指向 {p.name}，需要 js_symbols.py（JS/TS/Vue 符号表），但它不在 PYTHONPATH 里。\n"
+                f"--source 指向 {p.name}，需要 {mod_name}.py（{supported} 符号表），"
+                "但它不在 PYTHONPATH 里。\n"
                 "Python 的 ast 抽不出这些语言的符号；没有它，跨块假报过滤会空转——"
                 "宁可明确报错，也不假装过滤过。"
             ) from exc
-        return collect_js_symbols(p)
+        return getattr(mod, fn_name)(p)
+
     raise SystemExit(
         f"--source 不支持的语言：{p.name}（{suffix or '无扩展名'}）。"
-        "目前支持 .py（内置）与 .js/.mjs/.cjs/.jsx/.ts/.tsx/.mts/.cts/.vue（需 js_symbols.py）。"
+        "目前支持 .py（内置）、.js/.mjs/.cjs/.jsx/.ts/.tsx/.mts/.cts/.vue（js_symbols.py）、"
+        ".go（go_symbols.py）、.rs（rust_symbols.py）。"
     )
 
 

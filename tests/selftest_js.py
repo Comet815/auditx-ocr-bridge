@@ -446,6 +446,183 @@ def main() -> int:
         check("V9 只有 import+const 的 .vue 也成块", ok,
               f"rc={r.returncode} stderr={r.stderr.strip()[:160]}")
 
+    # ── Go 节：package 前导是硬约束，方法标签带 receiver ───────────────────
+    import chunk_go  # noqa: E402
+    import go_symbols  # noqa: E402
+
+    GO_LINES = [
+        "// Package demo does things.",
+        "package demo",
+        "",
+        "import (",
+        '\t"fmt"',
+        '\talias "os"',
+        ")",
+        "",
+        "const MaxSize = 3 // trailing note",
+        "",
+        "type Store struct {",
+        "\tCache map[string]int",
+        "\tcount int",
+        "}",
+        "",
+        "func NewStore() *Store { return &Store{} }",
+        "",
+        "func (s *Store) Load(id string, opts ...int) ([]byte, error) {",
+        "\tx := 1 // MARK_GO_LOAD",
+        "\tfmt.Println(x, alias.Scheme)",
+        "\treturn nil, nil",
+        "}",
+        "",
+        "func helper(a, b int) int { return a + b }",
+    ]
+    GO_FIXTURE = "\n".join(GO_LINES) + "\n"
+
+    def go_truth(marker: str) -> int:
+        for i, ln in enumerate(GO_LINES, 1):
+            if marker in ln:
+                return i
+        raise AssertionError(marker)
+
+    with tempfile.TemporaryDirectory() as td8:
+        td8 = Path(td8)
+        gsrc = td8 / "smoke.go"
+        gsrc.write_text(GO_FIXTURE, encoding="utf-8")
+        gout = td8 / ".chunks"
+        r = subprocess.run(
+            [sys.executable, str(CHUNK_JS.parent / "chunk_go.py"), str(gsrc),
+             "--out", str(gout), "--max-lines", "6", "--no-git"],
+            capture_output=True, text=True)
+        check("G1 chunk_go 退出码 0", r.returncode == 0,
+              f"rc={r.returncode} stderr={r.stderr.strip()[:200]}")
+        if r.returncode == 0:
+            gman = json.loads((gout / "manifest.json").read_text("utf-8"))
+            check("G2 language=go", gman.get("language") == "go")
+            check("G3 failed=0", gman.get("failed") == 0)
+            for c in gman["chunks"]:
+                text = (gout / c["file"]).read_text(encoding="utf-8")
+                cl = text.splitlines()
+                check(f"G4 每块带 package 子句 {c['file']}",
+                      "package demo" in cl[:gman["preamble_lines"]])
+                check(f"G5 body 逐字相等 {c['file']}",
+                      cl[c["body_start"] - 1:
+                         c["body_start"] - 1 + c["n_lines"]]
+                      == GO_LINES[c["start_line"] - 1: c["end_line"]])
+                check(f"G6 块可重解析 {c['file']}",
+                      not chunk_go.has_error(chunk_go.parse_go(text).root_node))
+            gline = go_truth("MARK_GO_LOAD")
+            owner = next((c for c in gman["chunks"]
+                          if c["start_line"] <= gline <= c["end_line"]), None)
+            check("G7 MARK_GO_LOAD 有归属块", owner is not None)
+            if owner is not None:
+                cl = (gout / owner["file"]).read_text(
+                    encoding="utf-8").splitlines()
+                cline = next(i for i, ln in enumerate(cl, 1)
+                             if "MARK_GO_LOAD" in ln)
+                check("G8 MARK_GO_LOAD 回映偏移 0",
+                      cline - owner["body_start"] + owner["start_line"] == gline)
+            check("G9 方法标签带 receiver",
+                  any("Store.Load" in c["symbol"] for c in gman["chunks"]),
+                  str([c["symbol"] for c in gman["chunks"]]))
+        gsyms = go_symbols.collect_go_symbols(gsrc)
+    check("G10 Go 符号必收项",
+          {"fmt", "alias", "MaxSize", "Store", "Cache", "count",
+           "NewStore", "Load", "s", "id", "opts", "helper", "a", "b"} <= gsyms,
+          f"缺 {sorted({'fmt', 'alias', 'MaxSize', 'Store', 'Cache', 'count', 'NewStore', 'Load', 's', 'id', 'opts', 'helper', 'a', 'b'} - gsyms)}")
+
+    # ── Rust 节：impl 补头补尾、属性并入、符号表 ───────────────────────────
+    import chunk_rust  # noqa: E402
+    import rust_symbols  # noqa: E402
+
+    RS_LINES = [
+        "use std::collections::HashMap;",
+        "use crate::util::{helper, other as alias_other};",
+        "",
+        "pub const MAX: usize = 3; // trailing note",
+        "static NAME: &str = \"x\";",
+        "",
+        "#[derive(Debug, Clone)]",
+        "pub struct Store<T> {",
+        "\tcache: HashMap<String, T>,",
+        "\tcount: usize,",
+        "}",
+        "",
+        "pub enum Color { Red, Green = 2 }",
+        "",
+        "pub trait Loader {",
+        "\tfn load(&self, id: &str) -> Option<Vec<u8>>;",
+        "}",
+        "",
+        "impl<T> Store<T> {",
+        "\tpub fn new() -> Self { Self { cache: HashMap::new(), count: 0 } }",
+        "\tpub async fn load(&mut self, id: &str) -> Option<T> {",
+        "\t\tlet v = 1; // MARK_RS_LOAD",
+        "\t\tNone",
+        "\t}",
+        "\tfn clear(&mut self) { self.count = 0; }",
+        "}",
+        "",
+        "pub fn make(x: i32) -> i32 { x + 1 }",
+    ]
+    RS_FIXTURE = "\n".join(RS_LINES) + "\n"
+
+    def rs_truth(marker: str) -> int:
+        for i, ln in enumerate(RS_LINES, 1):
+            if marker in ln:
+                return i
+        raise AssertionError(marker)
+
+    with tempfile.TemporaryDirectory() as td9:
+        td9 = Path(td9)
+        rsrc = td9 / "smoke.rs"
+        rsrc.write_text(RS_FIXTURE, encoding="utf-8")
+        rout = td9 / ".chunks"
+        r = subprocess.run(
+            [sys.executable, str(CHUNK_JS.parent / "chunk_rust.py"), str(rsrc),
+             "--out", str(rout), "--max-lines", "7", "--no-git"],
+            capture_output=True, text=True)
+        check("R1 chunk_rust 退出码 0", r.returncode == 0,
+              f"rc={r.returncode} stderr={r.stderr.strip()[:200]}")
+        if r.returncode == 0:
+            rman = json.loads((rout / "manifest.json").read_text("utf-8"))
+            check("R2 language=rust", rman.get("language") == "rust")
+            check("R3 failed=0", rman.get("failed") == 0)
+            for c in rman["chunks"]:
+                text = (rout / c["file"]).read_text(encoding="utf-8")
+                cl = text.splitlines()
+                check(f"R4 body 逐字相等 {c['file']}",
+                      cl[c["body_start"] - 1:
+                         c["body_start"] - 1 + c["n_lines"]]
+                      == RS_LINES[c["start_line"] - 1: c["end_line"]])
+                check(f"R5 块可重解析 {c['file']}",
+                      not chunk_rust.has_error(
+                          chunk_rust.parse_rs(text).root_node))
+                if c.get("class"):
+                    check(f"R6 impl 头+尾 {c['file']}",
+                          cl[c["body_start"] - 2] == f"impl {c['class']} {{" and
+                          cl[c["body_start"] - 1 + c["n_lines"]] == "}")
+            rline = rs_truth("MARK_RS_LOAD")
+            owner = next((c for c in rman["chunks"]
+                          if c["start_line"] <= rline <= c["end_line"]), None)
+            check("R7 MARK_RS_LOAD 有归属块", owner is not None)
+            if owner is not None:
+                cl = (rout / owner["file"]).read_text(
+                    encoding="utf-8").splitlines()
+                cline = next(i for i, ln in enumerate(cl, 1)
+                             if "MARK_RS_LOAD" in ln)
+                check("R8 MARK_RS_LOAD 回映偏移 0",
+                      cline - owner["body_start"] + owner["start_line"] == rline)
+            attr_line = rs_truth("#[derive")
+            check("R9 属性行并入 struct 块起点",
+                  any(c["start_line"] == attr_line for c in rman["chunks"]),
+                  str([(c["file"], c["start_line"]) for c in rman["chunks"]]))
+        rsyms = rust_symbols.collect_rust_symbols(rsrc)
+    check("R10 Rust 符号必收项",
+          {"HashMap", "helper", "alias_other", "MAX", "NAME", "Store",
+           "cache", "count", "Color", "Red", "Green", "Loader", "load",
+           "new", "clear", "make", "x", "id", "self", "T"} <= rsyms,
+          f"缺 {sorted({'HashMap', 'helper', 'alias_other', 'MAX', 'NAME', 'Store', 'cache', 'count', 'Color', 'Red', 'Green', 'Loader', 'load', 'new', 'clear', 'make', 'x', 'id', 'self', 'T'} - rsyms)}")
+
     print(f"\n通过 {len(PASSES)} · 失败 {len(FAILS)}")
     return 0 if not FAILS else 1
 
