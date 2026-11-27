@@ -221,6 +221,12 @@ def _walk(node, src: bytes, out: set[str]):
         if nm is not None:
             out.add(_text(nm, src))
 
+    elif t in ("type_parameter", "constrained_type_parameter"):
+        # 泛型类型参数：名字是 name 域下的 type_identifier
+        nm = node.child_by_field_name("name")
+        if nm is not None:
+            out.add(_text(nm, src))
+
     elif t == "enum_body":
         # enum 成员名多收：Color.Red 里的 Red 不是裸绑定，但模型断言
         # 提到它时按「源文件里有这个名字」处理更保守

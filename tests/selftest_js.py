@@ -17,7 +17,10 @@ import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-CHUNK_JS = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else HERE / "chunk_js.py"
+# chunker 们的位置：与自测同目录（开发布局）或上一级（仓库 tests/ 布局）
+CHUNK_DIR = HERE if (HERE / "chunk_js.py").exists() else HERE.parent
+CHUNK_JS = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 \
+    else CHUNK_DIR / "chunk_js.py"
 
 FAILS: list[str] = []
 PASSES: list[str] = []
@@ -88,9 +91,14 @@ def truth_line(marker: str) -> int:
 
 
 def main() -> int:
-    sys.path.insert(0, str(HERE))
-    # 集成适配：本仓 chunk_*.py 在仓根，补一条路径（逻辑未改）
-    sys.path.insert(0, str(CHUNK_JS.parent))
+    sys.path.insert(0, str(CHUNK_DIR))
+    try:
+        import chunk_go, chunk_rust, chunk_ts, chunk_vue  # noqa: F401,E402
+        import go_symbols, rust_symbols  # noqa: F401,E402
+    except ImportError as ex:
+        # 没装 tree-sitter 全家桶时优雅跳过，别硬崩（同 test_bridge 的口径）
+        print(f"SKIP selftest_js：依赖缺失（{ex}），跳过全部用例")
+        return 0
     import chunk_js  # noqa: E402  （同目录导入被测模块做重解析自检）
 
     with tempfile.TemporaryDirectory() as td:
@@ -285,7 +293,7 @@ def main() -> int:
         tsrc.write_text(TS_FIXTURE, encoding="utf-8")
         tout = td4 / ".chunks"
         r = subprocess.run(
-            [sys.executable, str(CHUNK_JS.parent / "chunk_ts.py"), str(tsrc),
+            [sys.executable, str(CHUNK_DIR / "chunk_ts.py"), str(tsrc),
              "--out", str(tout), "--max-lines", "8", "--no-git"],
             capture_output=True, text=True)
         check("T1 chunk_ts 退出码 0", r.returncode == 0,
@@ -341,7 +349,7 @@ def main() -> int:
             "};\n", encoding="utf-8")
         xout = td5 / ".chunks"
         r = subprocess.run(
-            [sys.executable, str(CHUNK_JS.parent / "chunk_ts.py"), str(xsrc),
+            [sys.executable, str(CHUNK_DIR / "chunk_ts.py"), str(xsrc),
              "--out", str(xout), "--no-git"],
             capture_output=True, text=True)
         ok = r.returncode == 0 and json.loads(
@@ -384,7 +392,7 @@ def main() -> int:
         vsrc.write_text(VUE_FIXTURE, encoding="utf-8")
         vout = td6 / ".chunks"
         r = subprocess.run(
-            [sys.executable, str(CHUNK_JS.parent / "chunk_vue.py"), str(vsrc),
+            [sys.executable, str(CHUNK_DIR / "chunk_vue.py"), str(vsrc),
              "--out", str(vout), "--no-git"],
             capture_output=True, text=True)
         check("V1 chunk_vue 退出码 0", r.returncode == 0,
@@ -438,7 +446,7 @@ def main() -> int:
             "</script>\n", encoding="utf-8")
         pout = Path(td7) / ".chunks"
         r = subprocess.run(
-            [sys.executable, str(CHUNK_JS.parent / "chunk_vue.py"), str(pp),
+            [sys.executable, str(CHUNK_DIR / "chunk_vue.py"), str(pp),
              "--out", str(pout), "--no-git"],
             capture_output=True, text=True)
         ok = r.returncode == 0 and len(json.loads(
@@ -490,7 +498,7 @@ def main() -> int:
         gsrc.write_text(GO_FIXTURE, encoding="utf-8")
         gout = td8 / ".chunks"
         r = subprocess.run(
-            [sys.executable, str(CHUNK_JS.parent / "chunk_go.py"), str(gsrc),
+            [sys.executable, str(CHUNK_DIR / "chunk_go.py"), str(gsrc),
              "--out", str(gout), "--max-lines", "6", "--no-git"],
             capture_output=True, text=True)
         check("G1 chunk_go 退出码 0", r.returncode == 0,
@@ -578,7 +586,7 @@ def main() -> int:
         rsrc.write_text(RS_FIXTURE, encoding="utf-8")
         rout = td9 / ".chunks"
         r = subprocess.run(
-            [sys.executable, str(CHUNK_JS.parent / "chunk_rust.py"), str(rsrc),
+            [sys.executable, str(CHUNK_DIR / "chunk_rust.py"), str(rsrc),
              "--out", str(rout), "--max-lines", "7", "--no-git"],
             capture_output=True, text=True)
         check("R1 chunk_rust 退出码 0", r.returncode == 0,
@@ -622,6 +630,180 @@ def main() -> int:
            "cache", "count", "Color", "Red", "Green", "Loader", "load",
            "new", "clear", "make", "x", "id", "self", "T"} <= rsyms,
           f"缺 {sorted({'HashMap', 'helper', 'alias_other', 'MAX', 'NAME', 'Store', 'cache', 'count', 'Color', 'Red', 'Green', 'Loader', 'load', 'new', 'clear', 'make', 'x', 'id', 'self', 'T'} - rsyms)}")
+
+    # ── F 节：class-first 回归（F13） ─────────────────────────────────────
+    # 类在文件最前且必须拆方法时，preamble 必须在类之前收尾（=0）；
+    # 按成员起点算会把 class 头算进前导区，合成头叠加后每块 ERROR、0 块。
+    CF_LINES = [
+        "class Store {",
+        "  #cache = new Map();",
+        "  constructor(db) { this.db = db; }",
+        "  async load(id) {",
+        "    const doc = await this.db.get(id);",
+        "    return doc; // MARK_CF_LOAD",
+        "  }",
+        "  clear() { this.#cache.clear(); }",
+        "}",
+    ]
+    with tempfile.TemporaryDirectory() as td10:
+        cf = Path(td10) / "cf.js"
+        cf.write_text("\n".join(CF_LINES) + "\n", encoding="utf-8")
+        cfout = Path(td10) / ".chunks"
+        r = subprocess.run(
+            [sys.executable, str(CHUNK_JS), str(cf), "--out", str(cfout),
+             "--max-lines", "6", "--no-git"],
+            capture_output=True, text=True)
+        check("F1 class-first JS 退出码 0", r.returncode == 0,
+              f"rc={r.returncode} stderr={r.stderr.strip()[:200]}")
+        if r.returncode == 0:
+            fman = json.loads((cfout / "manifest.json").read_text("utf-8"))
+            check("F2 class-first failed=0 且有块",
+                  fman.get("failed") == 0 and len(fman["chunks"]) >= 1)
+            check("F3 class-first preamble=0（类头不进前导区）",
+                  fman.get("preamble_lines") == 0,
+                  f"实际 {fman.get('preamble_lines')}")
+            check("F4 class-first 拆出 Store 方法块",
+                  any(c.get("class") == "Store" for c in fman["chunks"]))
+            for c in fman["chunks"]:
+                cl = (cfout / c["file"]).read_text(
+                    encoding="utf-8").splitlines()
+                check(f"F5 body 逐字相等 {c['file']}",
+                      cl[c["body_start"] - 1:
+                         c["body_start"] - 1 + c["n_lines"]]
+                      == CF_LINES[c["start_line"] - 1: c["end_line"]])
+            mline = next(i for i, ln in enumerate(CF_LINES, 1)
+                         if "MARK_CF_LOAD" in ln)
+            owner = next((c for c in fman["chunks"]
+                          if c["start_line"] <= mline <= c["end_line"]), None)
+            if owner is not None:
+                cl = (cfout / owner["file"]).read_text(
+                    encoding="utf-8").splitlines()
+                cline = next(i for i, ln in enumerate(cl, 1)
+                             if "MARK_CF_LOAD" in ln)
+                check("F6 MARK_CF_LOAD 回映偏移 0",
+                      cline - owner["body_start"] + owner["start_line"] == mline)
+
+    CFT_LINES = [
+        "export class Repo<T> {",
+        "  private count: number = 0;",
+        "  constructor(private db: object) {}",
+        "  async fetch(id: string): Promise<T | null> {",
+        "    const row = await this.db; // MARK_CFT_FETCH",
+        "    return null;",
+        "  }",
+        "  clear(): void { this.count = 0; }",
+        "}",
+    ]
+    with tempfile.TemporaryDirectory() as td11:
+        cft = Path(td11) / "cf.ts"
+        cft.write_text("\n".join(CFT_LINES) + "\n", encoding="utf-8")
+        cftout = Path(td11) / ".chunks"
+        r = subprocess.run(
+            [sys.executable, str(CHUNK_DIR / "chunk_ts.py"), str(cft),
+             "--out", str(cftout), "--max-lines", "6", "--no-git"],
+            capture_output=True, text=True)
+        check("F7 class-first TS 退出码 0 且 preamble=0",
+              r.returncode == 0 and json.loads(
+                  (cftout / "manifest.json").read_text("utf-8")
+              ).get("preamble_lines") == 0,
+              f"rc={r.returncode} stderr={r.stderr.strip()[:160]}")
+
+    CFV_LINES = [
+        "<template><view /></template>",
+        "<script>",
+        "class Store {",
+        "  constructor(db) { this.db = db; }",
+        "  async load(id) {",
+        "    return await this.db.get(id); // MARK_CFV_LOAD",
+        "  }",
+        "  clear() { this.db = null; }",
+        "}",
+        "export default Store;",
+        "</script>",
+    ]
+    with tempfile.TemporaryDirectory() as td12:
+        cfv = Path(td12) / "cf.vue"
+        cfv.write_text("\n".join(CFV_LINES) + "\n", encoding="utf-8")
+        cfvout = Path(td12) / ".chunks"
+        r = subprocess.run(
+            [sys.executable, str(CHUNK_DIR / "chunk_vue.py"), str(cfv),
+             "--out", str(cfvout), "--max-lines", "6", "--no-git"],
+            capture_output=True, text=True)
+        check("F8 class-first Vue 退出码 0", r.returncode == 0,
+              f"rc={r.returncode} stderr={r.stderr.strip()[:200]}")
+        if r.returncode == 0:
+            vman2 = json.loads((cfvout / "manifest.json").read_text("utf-8"))
+            # 前导 = 2 行填充（template + script 标签行），script 内前导为 0
+            check("F9 Vue class-first preamble 只含填充行",
+                  vman2.get("preamble_lines") == 2,
+                  f"实际 {vman2.get('preamble_lines')}")
+            mline = next(i for i, ln in enumerate(CFV_LINES, 1)
+                         if "MARK_CFV_LOAD" in ln)
+            owner = next((c for c in vman2["chunks"]
+                          if c["start_line"] <= mline <= c["end_line"]), None)
+            check("F10 MARK_CFV_LOAD 有归属块", owner is not None)
+            if owner is not None:
+                cl = (cfvout / owner["file"]).read_text(
+                    encoding="utf-8").splitlines()
+                cline = next(i for i, ln in enumerate(cl, 1)
+                             if "MARK_CFV_LOAD" in ln)
+                check("F11 MARK_CFV_LOAD 回映 .vue 偏移 0",
+                      cline - owner["body_start"] + owner["start_line"] == mline)
+
+    # ── X 节：js_symbols 对抗（export / hoisting / JSX 边界） ──────────────
+    with tempfile.TemporaryDirectory() as td13:
+        td13 = Path(td13)
+        xa = td13 / "adv.js"
+        xa.write_text("\n".join([
+            "boot();",
+            "function boot() { return helper(); }",
+            "var helper = function () { return 1; };",
+            "export { boot as main, helper };",
+            "export * from './other.js';",
+            "export default boot;",
+            "class Late { }",
+            "const inst = new Late();",
+        ]) + "\n", encoding="utf-8")
+        xgot = js_symbols.collect_js_symbols(xa)
+        check("X1 hoisting：后声明的 function/var 照样收",
+              {"boot", "helper"} <= xgot, f"实得 {sorted(xgot)[:12]}")
+        check("X2 export 别名与类名收",
+              {"main", "Late", "inst"} <= xgot)
+        check("X3 export * 不带入外部名",
+              "foreignThing" not in xgot and "other" not in xgot)
+
+        xb = td13 / "adv.ts"
+        xb.write_text("\n".join([
+            "export interface Props { title: string; }",
+            "export type Handler = (e: Event) => void;",
+            "export { Props as PublicProps };",
+            "export enum Mode { A, B }",
+            "const internal = 1;",
+            "export { internal as exposed };",
+        ]) + "\n", encoding="utf-8")
+        xgot = js_symbols.collect_js_symbols(xb)
+        check("X4 TS export 边界（interface/type/enum/别名）",
+              {"Props", "PublicProps", "Handler", "Mode", "A", "B",
+               "internal", "exposed"} <= xgot,
+              f"缺 {sorted({'Props', 'PublicProps', 'Handler', 'Mode', 'A', 'B', 'internal', 'exposed'} - xgot)}")
+        check("X5 类型引用不算绑定（Event 不收）", "Event" not in xgot)
+
+        xc = td13 / "adv.tsx"
+        xc.write_text("\n".join([
+            "import React from 'react';",
+            "interface P { title: string; onSave?: () => void; }",
+            "export function Card({ title, onSave }: P) {",
+            "  return <div onClick={onSave}>{title}<Widget /></div>;",
+            "}",
+            "export const List = <T,>(items: T[]) => items.length;",
+        ]) + "\n", encoding="utf-8")
+        xgot = js_symbols.collect_js_symbols(xc)
+        check("X6 JSX 组件参数解构与泛型箭头参数收",
+              {"React", "P", "Card", "title", "onSave", "List", "items", "T"}
+              <= xgot,
+              f"缺 {sorted({'React', 'P', 'Card', 'title', 'onSave', 'List', 'items', 'T'} - xgot)}")
+        check("X7 JSX 里用到的未定义组件不算定义（Widget 不收）",
+              "Widget" not in xgot)
 
     print(f"\n通过 {len(PASSES)} · 失败 {len(FAILS)}")
     return 0 if not FAILS else 1
