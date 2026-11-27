@@ -199,7 +199,16 @@ python chunk_big.py tests/fixture_big.py --out .test_chunks --no-git
 | C | 纯转换端到端（含行号回映真值） |
 | D–J | 已修 bug 的回归：装饰器边界、回映边界、中文语义、脏 JSON、输出护栏、fail-closed、`-o` |
 
-CI 在 Python 3.11 / 3.12 × Ubuntu / Windows 上跑 `py_compile` + 全量自检。
+CI 在 Python 3.11 / 3.12 × Ubuntu / Windows 上跑 `py_compile` + 全量自检，
+再跑一遍**几何真值**：拿 `tests/fixtures/` 里的样本切分，逐块比对
+`body_start` 指向的块内行与源文件 `start_line` 行是否逐字相同。
+
+```powershell
+# 与 CI 同一条命令（--max-lines 20 是为了真正走到"类/方法被切开"的路径）
+python qa/regress_chunker.py --cmd "python chunk_js.py" --target tests/fixtures/js --ext .js --max-lines 20
+```
+
+这条比"跑通不报错"强：分段器可以跑通却把行号算错，而几何真值只有拿源文件比才看得出来。
 
 ---
 
