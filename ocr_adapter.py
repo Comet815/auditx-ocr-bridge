@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import builtins
 import json
 import re
 import sys
@@ -260,6 +261,9 @@ def build_locator_remapped(c: dict, manifest=None,
 #   全文件都没有     → 真缺陷，保留
 
 _IDENT_IN_BACKTICK = re.compile(r"`([A-Za-z_][A-Za-z0-9_]*)")
+# 裸函数名：call() / build_prompt() —— 英文报告里非常常见，不带反引号。
+# 前面不能是点或词字符，免得把 `os.system()` 里的 system 当成顶层符号。
+_CALL_IDENT = re.compile(r"(?<![.\w])([A-Za-z_][A-Za-z0-9_]*)\(\)")
 # 无引号时的兜底：从典型句式里抠符号名
 _IDENT_PATTERNS = [
     re.compile(r"Missing\s+([A-Za-z_][A-Za-z0-9_]*)\s+(?:class|function|definition)", re.I),
@@ -267,6 +271,7 @@ _IDENT_PATTERNS = [
     re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s+is\s+(?:not|never)\s+imported", re.I),
     re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s+is\s+not\s+defined", re.I),
     re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s+is\s+neither\s+imported", re.I),
+    re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s+is\s+(?:never|not)\s+defined", re.I),
     # 中文句式（OCR 在中文语境大量输出中文 claim，README 自己举的例子就是中文）
     re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:未|没有|缺少|缺失)(?:被)?(?:导入|定义|声明)"),
     re.compile(r"(?:缺少|未见|未发现)\s*([A-Za-z_][A-Za-z0-9_]*)\s*的?\s*(?:导入|定义|声明)"),
@@ -276,38 +281,54 @@ _STOPWIDTH = {
     "the", "a", "an", "this", "that", "it", "is", "are", "was", "were", "be",
     "import", "imported", "definition", "class", "function", "helper", "name",
     "critical", "high", "medium", "low", "code", "file", "line", "module",
+    # 连词/虚词：句式层会盯 "X is never defined" 前面那个词，不挡就会抽到 but/and
+    "but", "and", "or", "so", "which", "where", "when", "here", "there",
+    "also", "then", "same", "applies", "above", "below",
 }
 # 闸门：这段文字是不是在说"某符号未导入/未定义"。只认英文的话，
 # 中文报告下这个过滤器完全空转（保守方向没错，但等于没过滤）。
 _UNDEF_PAT = re.compile(
     r"(not imported|is never imported|NameError|undefined|"
     r"neither imported nor defined|missing .{0,40}(class|function|definition)|"
+    r"(?:is|are)\s+(?:not|never)\s+(?:defined|declared|imported)|"
     r"未(?:被)?导入|没有(?:被)?导入|未被定义|未定义|没有定义|"
     r"缺少.{0,12}(?:导入|定义)|缺失.{0,12}(?:导入|定义))",
     re.I,
 )
 
 
-def extract_identifiers(claim: str) -> list:
-    """从 claim 里抽出被点名的符号（先去反引号，再走句式兜底）"""
-    found = [m.group(1) for m in _IDENT_IN_BACKTICK.finditer(claim)]
-    if not found:
-        for pat in _IDENT_PATTERNS:
-            found.extend(m.group(1) for m in pat.finditer(claim))
-    import builtins
+def _usable(name: str) -> bool:
+    """能不能当"被点名的符号"：太短、太常见、是内置名，都不算"""
+    if not name or len(name) <= 2:
+        return False
+    if name.lower() in _STOPWIDTH:
+        return False
+    # 内置名（NameError / ValueError …）不算"缺失的符号"
+    return not hasattr(builtins, name)
 
-    out = []
-    for x in found:
-        if not x or len(x) <= 2:
-            continue
-        if x.lower() in _STOPWIDTH:
-            continue
-        # 内置名（NameError / ValueError …）不算"缺失的符号"
-        if hasattr(builtins, x):
-            continue
-        out.append(x)
+
+def extract_identifiers(claim: str) -> list:
+    """从 claim 里抽出被点名的符号
+
+    顺序：反引号 → 句式 → 裸函数名。每层都要先清洗，清洗空了才往下走 ——
+    否则 "…but is never defined…" 里的连词 `but` 会被句式层抓走，
+    非空就挡住了后面的裸函数名兜底（盲测实锤踩过）。
+    """
+    picked = [x for x in (m.group(1) for m in _IDENT_IN_BACKTICK.finditer(claim))
+              if _usable(x)]
+    if not picked:
+        from_pat = []
+        for pat in _IDENT_PATTERNS:
+            from_pat.extend(m.group(1) for m in pat.finditer(claim))
+        picked = [x for x in from_pat if _usable(x)]
+    if not picked:
+        # 英文报告的常见写法：`call()`、`build_prompt()` 这种裸函数名。
+        # 盲测实测：一条 "call() is invoked here but is never defined or
+        # imported..." 的跨块假报，闸门命中了但这里抽不出符号，于是被放过。
+        picked = [x for x in (m.group(1) for m in _CALL_IDENT.finditer(claim))
+                  if _usable(x)]
     seen = set()
-    return [x for x in out if not (x in seen or seen.add(x))]
+    return [x for x in picked if not (x in seen or seen.add(x))]
 
 
 def collect_source_symbols(src_path: Path) -> set:

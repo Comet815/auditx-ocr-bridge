@@ -487,6 +487,35 @@ def test_cli_out(tmp):
           dest.exists() and "findings" in json.loads(dest.read_text(encoding="utf-8")))
 
 
+def test_blindtest_regression(tmp):
+    """盲测实锤：英文裸函数名的跨块假报曾被放过"""
+    print("\n[K] 盲测回归（2026-11-27 缪斯盲测那条真实假报）")
+    import ocr_adapter as A
+
+    src = tmp / "blind_src.py"
+    src.write_text(
+        "import json\n\n\n"
+        "def strip_fences(t):\n    return t\n\n\n"
+        "def build_prompt(a, b):\n    return str(a) + str(b)\n\n\n"
+        "def call(x):\n    return json.dumps(x)\n\n\n"
+        "def main():\n    return call(build_prompt(1, 2))\n",
+        encoding="utf-8")
+    symbols = A.collect_source_symbols(src)
+
+    claim = ("call() is invoked here but is never defined or imported in this file; "
+             "the same applies to build_prompt() and strip_fences(). "
+             "As written, this file would raise NameError at runtime.")
+    fake, why = A.is_chunk_artifact({"content": claim}, symbols)
+    check("K1 英文裸函数名的跨块假报被过滤", fake, why)
+    idents = A.extract_identifiers(claim)
+    check("K2 抽到的是符号而不是连词",
+          idents == ["call", "build_prompt", "strip_fences"], str(idents))
+
+    claim2 = "run_job() is invoked here but is never defined or imported in this file."
+    fake2, _ = A.is_chunk_artifact({"content": claim2}, symbols)
+    check("K3 真缺陷不被误杀", not fake2)
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -502,6 +531,7 @@ def main():
         test_guards(tmp)
         test_post_failclosed(tmp)
         test_cli_out(tmp)
+        test_blindtest_regression(tmp)
 
     print(f"\n{'=' * 50}")
     print(f"通过 {len(PASSES)} · 失败 {len(FAILS)}")
