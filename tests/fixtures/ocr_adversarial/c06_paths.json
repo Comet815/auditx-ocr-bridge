@@ -1,0 +1,44 @@
+{
+  "session_id": "adversarial",
+  "comments": [
+    {
+      "content": "样本断言：此处存在问题。",
+      "existing_code": "payload = json.loads(body)",
+      "suggestion_code": "",
+      "start_line": 40,
+      "end_line": 40,
+      "category": "bug",
+      "severity": "high"
+    },
+    {
+      "path": "",
+      "content": "样本断言二：路径为空串。",
+      "existing_code": "payload = json.loads(body)",
+      "suggestion_code": "",
+      "start_line": 41,
+      "end_line": 41,
+      "category": "bug",
+      "severity": "high"
+    },
+    {
+      "path": "../chunks/chunk_01_strip_fences.py",
+      "content": "样本断言三：路径带上级目录。",
+      "existing_code": "payload = json.loads(body)",
+      "suggestion_code": "",
+      "start_line": 42,
+      "end_line": 42,
+      "category": "bug",
+      "severity": "high"
+    },
+    {
+      "path": "chunks/chunk_01_strip_fences.py",
+      "content": "样本断言四：路径带目录前缀。",
+      "existing_code": "payload = json.loads(body)",
+      "suggestion_code": "",
+      "start_line": 43,
+      "end_line": 43,
+      "category": "bug",
+      "severity": "high"
+    }
+  ]
+}

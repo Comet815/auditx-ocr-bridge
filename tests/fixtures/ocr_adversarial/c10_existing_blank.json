@@ -1,0 +1,25 @@
+{
+  "session_id": "adversarial",
+  "comments": [
+    {
+      "path": "chunks/chunk_01_strip_fences.py",
+      "content": "样本断言五：证据为空白。",
+      "existing_code": "   ",
+      "suggestion_code": "",
+      "start_line": 41,
+      "end_line": 41,
+      "category": "bug",
+      "severity": "high"
+    },
+    {
+      "path": "chunks/chunk_01_strip_fences.py",
+      "content": "样本断言六：证据只有换行。",
+      "existing_code": "\n\n",
+      "suggestion_code": "",
+      "start_line": 42,
+      "end_line": 42,
+      "category": "bug",
+      "severity": "high"
+    }
+  ]
+}

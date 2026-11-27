@@ -1,0 +1,25 @@
+{
+  "session_id": "adversarial",
+  "comments": [
+    {
+      "path": "chunks/chunk_01_strip_fences.py",
+      "content": "样本断言八：严重度未知值。",
+      "existing_code": "payload = json.loads(body)",
+      "suggestion_code": "",
+      "start_line": 44,
+      "end_line": 44,
+      "category": "bug",
+      "severity": "CRITICAL!"
+    },
+    {
+      "path": "chunks/chunk_01_strip_fences.py",
+      "content": "样本断言九：严重度中文。",
+      "existing_code": "payload = json.loads(body)",
+      "suggestion_code": "",
+      "start_line": 45,
+      "end_line": 45,
+      "category": "bug",
+      "severity": "严重"
+    }
+  ]
+}

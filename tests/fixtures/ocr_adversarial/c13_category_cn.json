@@ -1,0 +1,25 @@
+{
+  "session_id": "adversarial",
+  "comments": [
+    {
+      "path": "chunks/chunk_01_strip_fences.py",
+      "content": "样本断言十：类别纯中文。",
+      "existing_code": "payload = json.loads(body)",
+      "suggestion_code": "",
+      "start_line": 46,
+      "end_line": 46,
+      "category": "安全漏洞",
+      "severity": "high"
+    },
+    {
+      "path": "chunks/chunk_01_strip_fences.py",
+      "content": "样本断言十一：类别中英混合多关键词。",
+      "existing_code": "payload = json.loads(body)",
+      "suggestion_code": "",
+      "start_line": 47,
+      "end_line": 47,
+      "category": "security 性能混合",
+      "severity": "high"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "session_id": "adversarial",
+  "comments": [
+    {
+      "path": "chunks/chunk_01_strip_fences.py",
+      "content": "样本断言：此处存在问题。",
+      "existing_code": "payload = json.loads(body)",
+      "suggestion_code": "",
+      "start_line": null,
+      "end_line": null,
+      "category": "bug",
+      "severity": "high"
+    }
+  ]
+}

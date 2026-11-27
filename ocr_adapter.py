@@ -511,11 +511,32 @@ def dedupe_findings(findings: list) -> tuple:
 
 def _format_locator(s, e, path, source_name=None, use_source_name=False) -> str:
     shown = source_name if (source_name and use_source_name) else path
+    shown = shown or "<unknown>"      # 两种模式统一：缺路径就写 <unknown>，不留空文件名
     if s and e and e != s:
         return f"{shown}:{s}-{e}"
     if s:
         return f"{shown}:{s}"
     return shown
+
+
+def _norm_line(v):
+    """行号规整 → 正整数 或 None。
+
+    OCR 的输出是模型生成的 JSON，行号可能是 "12"（字符串）、0、负数、null。
+    直接拿去做算术会在回映模式下 TypeError 崩栈（对抗语料 c01+M）；
+    直接拼进 locator 会产出 `:10-5`、`:-5--2` 这种垃圾位置（c04/c05）。
+    策略：能规整的规整（"12"→12），规整不了的当"没有行号"，由调用方计数并告警。
+    绝不把非法行号写进账本。
+    """
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v if v > 0 else None
+    if isinstance(v, str):
+        t = v.strip()
+        if t.isdigit() and int(t) > 0:
+            return int(t)
+    return None
 
 
 def convert(ocr_json: dict, source_file: str | None = None,
@@ -524,11 +545,21 @@ def convert(ocr_json: dict, source_file: str | None = None,
             source_symbols: set | None = None) -> dict:
     """返回 {findings: [...], stats: {...}}"""
     session_id = ocr_json.get("session_id")
-    comments = ocr_json.get("comments") or []
+    comments = ocr_json.get("comments")
+    if comments is None:
+        comments = []
+    elif not isinstance(comments, list):
+        # 结构错误要**干净地整批拒绝**，而不是走到下面 AttributeError 崩栈
+        raise SystemExit(
+            f"comments 不是数组（实际是 {type(comments).__name__}）：{ocr_json.get('comments')!r:.80}\n"
+            "OCR 的输出里 comments 一定是数组。拒绝解析——继续往下会逐条崩在 .get() 上。"
+        )
 
     findings = []
     dropped_empty_claim = 0
     dropped_artifacts = []
+    skipped_bad_item = 0
+    line_issues = {"malformed": 0, "missing": 0, "reversed": 0}
     remap_stats = {
         "enabled": manifest is not None,
         "language": getattr(manifest, "language", None) if manifest else None,
@@ -543,22 +574,42 @@ def convert(ocr_json: dict, source_file: str | None = None,
         "unmatched_paths": [],   # manifest 里找不到的块路径（去重）
     }
     for c in comments:
+        if not isinstance(c, dict):
+            skipped_bad_item += 1
+            continue
         claim = (c.get("content") or "").strip()
         if not claim:
             dropped_empty_claim += 1
             continue
-        fp, why = is_chunk_artifact(c, source_symbols)
+
+        # 行号规整：OCR 的 JSON 是模型生成的，可能给 "12" / 0 / 负数 / null。
+        # 非法值一律当"没有行号"处理并计数——绝不写进账本（见 _norm_line）。
+        raw_s = c.get("start_line")
+        raw_e = c.get("end_line")
+        s = _norm_line(raw_s)
+        e = _norm_line(raw_e)
+        if s is None and raw_s not in (None, ""):
+            line_issues["malformed"] += 1
+        if s is None:
+            line_issues["missing"] += 1
+        if s is not None and e is not None and e < s:
+            line_issues["reversed"] += 1
+            e = None
+        c_norm = dict(c, start_line=s, end_line=e,
+                      path=(c.get("path") or "").strip() or None)
+
+        fp, why = is_chunk_artifact(c_norm, source_symbols)
         if fp:
             dropped_artifacts.append({
                 "path": c.get("path"),
-                "line": c.get("start_line"),
+                "line": raw_s,
                 "reason": why,
                 "claim": claim[:180],
             })
             continue
 
         if manifest:
-            s, e, path, status = remap_detail(c, manifest)
+            s, e, path, status = remap_detail(c_norm, manifest)
             key = manifest.resolve(path) if hasattr(manifest, "resolve") else None
             if key and key != path:
                 remap_stats["basename_matched"] += 1
@@ -581,9 +632,9 @@ def convert(ocr_json: dict, source_file: str | None = None,
                 if c.get("path") not in remap_stats["unmatched_paths"]:
                     remap_stats["unmatched_paths"].append(c.get("path"))
         else:
-            path = c.get("path") or ""
+            path = c_norm.get("path") or ""
             status = "no-manifest"
-            locator = build_locator(c)
+            locator = build_locator(c_norm)
 
         findings.append({
             "dimension": map_dimension(c.get("category")),
@@ -602,7 +653,9 @@ def convert(ocr_json: dict, source_file: str | None = None,
                 "ocr_path": c.get("path"),
                 "ocr_severity": c.get("severity"),
                 "ocr_category": c.get("category"),
-                "chunk_line": c.get("start_line"),
+                # 原始行号（未规整）：规整把 "12" 变成 12 时，这里留原值便于溯源
+                "chunk_line": raw_s,
+                "chunk_line_raw": raw_s if raw_s != s else None,
                 "remapped": status in ("remapped", "preamble", "header"),
                 "remap_status": status,
             },
@@ -623,6 +676,9 @@ def convert(ocr_json: dict, source_file: str | None = None,
             "dropped_empty_claim": dropped_empty_claim,
             "dropped_chunk_artifacts": len(dropped_artifacts),
             "dropped_detail": dropped_artifacts,
+            # 结构/数值健壮性：这些以前是静默通过的（对抗语料 c01–c09）
+            "skipped_bad_item": skipped_bad_item,
+            "line_issues": line_issues,
             "severity_histogram": _hist(f["severity"] for f in findings),
             "dimension_histogram": _hist(f["dimension"] for f in findings),
             "remap": remap_stats,
@@ -667,9 +723,28 @@ def load_ocr_json(path: Path) -> dict:
 
     用 raw_decode 从第一个能解析成 dict 的 `{` 开始，解析完即止、不管尾部 ——
     日志在前（进度行）和日志在后（"Scan complete in 12.3s"）都能吃下。
+
+    但**顶层是数组直接拒绝**：OCR 永远输出对象。拿一个 comments 数组当整份输出时，
+    "找第一个 dict" 会把数组的第一个元素误当文档，整批 comment 静默丢失、退出码还是 0
+    —— 这正是本仓最怕的静默失败（2026-11-27 对抗语料 c14/c15 实测）。
     """
     raw = path.read_text(encoding="utf-8", errors="replace")
     dec = json.JSONDecoder()
+    # 先整份解析：里层 `"comments": []` 这种空数组是合法的，不能见 '[' 就拒。
+    # 只有**整份就是数组**才拒绝——OCR 永远输出对象；拿 comments 数组当整份输出时，
+    # "找第一个 dict" 会把数组第一个元素误当文档，整批 comment 静默丢失（c14/c15）。
+    try:
+        whole = json.loads(raw)
+    except json.JSONDecodeError:
+        whole = None
+    if isinstance(whole, list):
+        raise SystemExit(
+            f"顶层是 JSON 数组，不是 OCR 的文档对象：{path.name}\n"
+            "常见原因：把 comments 数组单独存了、或者两个文件拼在一起。\n"
+            "拒绝解析——继续往下会静默丢掉除第一个元素外的全部内容。"
+        )
+    if isinstance(whole, dict):
+        return whole
     idx = raw.find("{")
     while idx >= 0:
         try:

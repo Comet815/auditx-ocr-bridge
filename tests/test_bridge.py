@@ -767,6 +767,86 @@ def test_ocr_golden(tmp):
           and sev.get("sample.js:37") == ("MAJOR", "logic"), str(sev))
 
 
+def test_adversarial_ocr(tmp):
+    """P：对抗 OCR 语料（缪斯造，2026-11-27 第二轮）
+
+    这一组是**裁决后的期望值**，不是"当前行为"。四条 bug 候选原先是：
+      1. start_line 是字符串 → 回映模式 TypeError 崩栈（c01+M）
+      2. 负行号 / 反序区间 → 原样写进 locator（c04/c05）
+      3. comments 不是数组 → AttributeError 崩栈（c09）
+      4. 顶层是数组 → 找第一个 dict，静默丢掉其余（c14/c15）
+
+    裁决口径：**结构/数值错误要可见，不写垃圾进账本，不留静默丢失**。
+    能规整的规整（"12"→12），规整不了的当"没有行号"并计数；结构错直接整批拒绝。
+    """
+    print("\n[P] 对抗 OCR 语料")
+    import ocr_adapter as A
+
+    FIX = ROOT / "tests" / "fixtures" / "ocr_adversarial"
+    if not FIX.exists():
+        print("  SKIP P（语料缺失）")
+        return
+
+    def run(name, manifest=None):
+        return A.convert(A.load_ocr_json(FIX / name), "local_worker.py",
+                         manifest, "local_worker.py", None)
+
+    # 1) 字符串行号：规整成 int，不崩
+    res = run("c01_start_string.json")
+    check("P1 字符串行号被规整而非崩溃",
+          res["findings"][0]["locator"].endswith(":12-14"),
+          res["findings"][0]["locator"])
+
+    # 2) 负行号：丢弃行号，只留文件名；并计数
+    res = run("c04_start_negative.json")
+    loc = res["findings"][0]["locator"]
+    check("P2 负行号不进 locator", "-5" not in loc, loc)
+    check("P2b 负行号被计数", res["stats"]["line_issues"]["malformed"] == 1,
+          str(res["stats"]["line_issues"]))
+
+    # 3) 反序区间：终点丢弃，保留起点单行
+    res = run("c05_end_before_start.json")
+    loc = res["findings"][0]["locator"]
+    check("P3 反序区间降级为单行", loc.endswith(":10"), loc)
+    check("P3b 反序被计数", res["stats"]["line_issues"]["reversed"] == 1,
+          str(res["stats"]["line_issues"]))
+
+    # 4) 缺路径/空路径：两种模式都写 <unknown>
+    res = run("c06_paths.json")
+    locs = [f["locator"] for f in res["findings"]]
+    check("P4 缺路径统一为 <unknown>",
+          sum(1 for x in locs if x.startswith("<unknown>")) == 2, str(locs))
+
+    # 5) comments 不是数组：干净拒绝（SystemExit），不是 AttributeError
+    try:
+        run("c09_comments_dict.json")
+        ok, msg = False, "没报错"
+    except SystemExit as e:
+        ok, msg = "comments" in str(e), str(e)[:40]
+    except Exception as e:  # noqa: BLE001
+        ok, msg = False, type(e).__name__
+    check("P5 comments 非数组 → 干净拒绝", ok, msg)
+
+    # 6) 顶层数组：拒绝，不许静默丢掉其余元素
+    for f in ("c14_top_array_doc.json", "c15_top_array_comments.json"):
+        try:
+            run(f)
+            ok, msg = False, "没报错"
+        except SystemExit as e:
+            ok, msg = "数组" in str(e), str(e)[:30]
+        except Exception as e:  # noqa: BLE001
+            ok, msg = False, type(e).__name__
+        check(f"P6 顶层数组拒绝：{f}", ok, msg)
+
+    # 7) 空/缺 comments：不崩，0 条
+    for f in ("c07_comments_empty.json", "c08_comments_missing.json"):
+        check(f"P7 空 comments 不崩：{f}", run(f)["stats"]["converted"] == 0)
+
+    # 8) 未知 severity 保守兜底 INFO（既有口径，语料复验）
+    sev = [f["severity"] for f in run("c12_severity_unknown.json")["findings"]]
+    check("P8 未知 severity → INFO", sev == ["INFO", "INFO"], str(sev))
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -787,6 +867,7 @@ def main():
         test_symbol_dispatch(tmp)
         test_js_trailing_comment(tmp)
         test_ocr_golden(tmp)
+        test_adversarial_ocr(tmp)
 
     print(f"\n{'=' * 50}")
     print(f"通过 {len(PASSES)} · 失败 {len(FAILS)}")

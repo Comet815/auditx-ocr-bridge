@@ -45,7 +45,10 @@ def walk_findings(obj, out):
                         if isinstance(e, dict) and e.get("kind") == "quote"
                         and isinstance(e.get("content"), str))
             if isinstance(q, str) and q.strip():
-                out.append({"locator": loc, "quote": q})
+                srcinfo = obj.get("_source")
+                ocr_path = (srcinfo.get("ocr_path")
+                            if isinstance(srcinfo, dict) else None)
+                out.append({"locator": loc, "quote": q, "ocr_path": ocr_path})
             return  # 命中即停，不再深入 finding 内部（_source 等）
         for v in obj.values():
             walk_findings(v, out)
@@ -78,11 +81,13 @@ def load_findings(path: Path) -> list:
 
 
 def parse_locator(loc: str):
+    """→ (path, start, end|None)；end 只在 locator 声明了范围时才有"""
     path, _, tail = loc.rpartition(":")
-    m = re.match(r"\s*(\d+)", tail)
+    m = re.match(r"\s*(\d+)(?:\s*-\s*(\d+))?", tail)
     if not path or not m:
-        return None, None
-    return path.strip(), int(m.group(1))
+        return None, None, None
+    end = int(m.group(2)) if m.group(2) else None
+    return path.strip(), int(m.group(1)), end
 
 
 def locate_quote(src_lines: list, quote: str) -> list:
@@ -106,6 +111,37 @@ def locate_quote(src_lines: list, quote: str) -> list:
     return confirmed or cands
 
 
+def load_intervals(path: Path) -> dict:
+    """分段清单 → {块文件名/裸名: (源起始行, 源结束行)}，供多候选消歧"""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    entries = (data.get("chunks") or data.get("manifest") or []) \
+        if isinstance(data, dict) else data if isinstance(data, list) else []
+    out: dict = {}
+    for c in entries:
+        if not isinstance(c, dict):
+            continue
+        name = c.get("file") or c.get("path")
+        if not name:
+            continue
+        a = b = None
+        rng = str(c.get("lines") or "")
+        if "-" in rng:
+            left, _, right = rng.partition("-")
+            try:
+                a, b = int(left), int(right)
+            except ValueError:
+                a = b = None
+        if a is None:
+            try:
+                a = int(c["start_line"])
+                b = int(c.get("end_line", a))
+            except (KeyError, TypeError, ValueError):
+                continue
+        out[name] = (a, b)
+        out.setdefault(Path(name).name, (a, b))
+    return out
+
+
 def pre_end_of(path: Path):
     """分段器口径的前导区行数（首个顶层 def/class 之前）"""
     try:
@@ -125,7 +161,12 @@ def main(argv=None) -> int:
     ap.add_argument("--source", action="append", default=[],
                     help="源文件（可多次）")
     ap.add_argument("--source-dir", help="源文件目录（按 basename 匹配）")
+    ap.add_argument("--chunk-manifest",
+                    help="分段清单 JSON：quote 多候选时用所属块的源区间消歧")
     args = ap.parse_args(argv)
+
+    intervals = load_intervals(Path(args.chunk_manifest)) \
+        if args.chunk_manifest else {}
 
     srcmap: dict = {}
     for s in args.source:
@@ -153,10 +194,11 @@ def main(argv=None) -> int:
     print(f"载入 {len(findings)} 条 finding（来自 {len(files)} 个文件）\n")
 
     # 分组核对
-    g = defaultdict(lambda: {"hits": [], "amb": 0, "noloc": 0, "nosrc": 0,
-                             "total": 0, "src": None})
+    g = defaultdict(lambda: {"hits": [], "endhits": [], "amb": 0, "noloc": 0,
+                             "nosrc": 0, "total": 0, "src": None,
+                             "disamb": 0, "outint": 0})
     for fd in findings:
-        path, ln = parse_locator(fd["locator"])
+        path, ln, end_ln = parse_locator(fd["locator"])
         gkey = path or "<无法解析 locator>"
         grp = g[gkey]
         grp["total"] += 1
@@ -170,21 +212,49 @@ def main(argv=None) -> int:
         cands = locate_quote(
             src.read_text(encoding="utf-8", errors="replace").splitlines(),
             fd["quote"])
+        if len(cands) > 1 and intervals and fd.get("ocr_path"):
+            iv = intervals.get(fd["ocr_path"]) or intervals.get(
+                Path(fd["ocr_path"]).name)
+            if iv is not None:
+                inside = [cn for cn in cands if iv[0] <= cn <= iv[1]]
+                if len(inside) == 1:
+                    grp["disamb"] += 1
+                    cands = inside
+                elif not inside:
+                    grp["outint"] += 1
         if not cands:
             grp["noloc"] += 1
         elif len(cands) == 1:
             grp["hits"].append((fd["locator"], ln, cands[0]))
+            if end_ln is not None:
+                # quote 占的行数就是它的行跨度；真值终点据此推，
+                # 不拿 locator 的跨度自证（那是循环论证）
+                span = max(1, len(fd["quote"].splitlines()))
+                grp["endhits"].append(
+                    (fd["locator"], end_ln, cands[0] + span - 1))
         else:
             grp["amb"] += 1
 
     # 输出
     verdicts = []
     for name, d in sorted(g.items()):
+        extra = ""
+        if d["disamb"]:
+            extra += f" · 区间消歧 {d['disamb']}"
+        if d["outint"]:
+            extra += f" · 候选全在块区间外 {d['outint']}"
         print(f"◆ {name}  （finding {d['total']} 条：定位 {len(d['hits'])} · "
-              f"多候选 {d['amb']} · 无法定位 {d['noloc']} · 无源文件 {d['nosrc']}）")
+              f"多候选 {d['amb']} · 无法定位 {d['noloc']} · 无源文件 {d['nosrc']}"
+              f"{extra}）")
+        endmap = {loc: (e, te) for loc, e, te in d["endhits"]}
         for loc, ln, true in d["hits"][:20]:
-            print(f"    {loc:44} locator行 {ln:>4} ↔ quote真值 {true:>4}"
-                  f" → 偏移 {ln - true:+d}")
+            line = (f"    {loc:44} locator行 {ln:>4} ↔ quote真值 {true:>4}"
+                    f" → 偏移 {ln - true:+d}")
+            if loc in endmap:
+                e, te = endmap[loc]
+                line += (f" · 终点 {e:>4} ↔ 真值 {te:>4}"
+                         f" → 终点偏移 {e - te:+d}")
+            print(line)
         if len(d["hits"]) > 20:
             print(f"    … 其余 {len(d['hits']) - 20} 条略")
         if d["hits"]:
@@ -204,6 +274,22 @@ def main(argv=None) -> int:
                 v = f"偏移分散 {dict(hist)} → 逐条人工核对"
             print(f"    ▶ 裁决：{v}")
             verdicts.append((name, v))
+        if d["endhits"]:
+            ehist = Counter(e - te for _, e, te in d["endhits"])
+            start_ok = bool(d["hits"]) and all(
+                ln - t == 0 for _, ln, t in d["hits"])
+            if len(ehist) == 1:
+                ec = next(iter(ehist))
+                if ec == 0:
+                    ev = "终点偏移恒为 0：end_line 与 quote 真值一致 ✓"
+                elif start_ok:
+                    ev = (f"起点对、终点错：终点偏移恒为 {ec:+d} ✗"
+                          "（start_line 已验对，问题只在 end_line）")
+                else:
+                    ev = f"终点偏移恒为 {ec:+d}（起点亦未对齐，先修起点再看终点）"
+            else:
+                ev = f"终点偏移分散 {dict(ehist)} → 逐条人工核对"
+            print(f"    ▶ 终点裁决：{ev}")
         print()
 
     print("─── 汇总 ───")
