@@ -553,6 +553,14 @@ def test_manifest_v2(tmp):
     rs = conv["stats"]["remap"]
     check("L5 stats 记录语言", rs["language"] == "python", str(rs["language"]))
 
+    # 已支持的语言共用同一套 body_start 语义，都能正常回映
+    for lang in ("javascript", "typescript", "vue"):
+        ml = A.load_chunk_manifest(out / "manifest.json")
+        ml.language = lang
+        _s, _e, _p, stl = A.remap_detail(
+            {"path": c["file"], "start_line": c["body_start"] + 1}, ml)
+        check(f"L8 {lang} 允许回映", stl == "remapped", stl)
+
     bad = A.load_chunk_manifest(out / "manifest.json")
     bad.language = "rust"
     _s, _e, _p, st = A.remap_detail(
@@ -615,6 +623,46 @@ def test_symbol_dispatch(tmp):
     check("M3 不支持的后缀明确报错", ok2)
 
 
+def test_js_trailing_comment(tmp):
+    """N：行尾注释不能被当成下一个单元的前导注释（2026-11-27 修）"""
+    print("\n[N] JS 行尾注释")
+    import json as _json
+    import subprocess
+
+    try:
+        import tree_sitter_javascript  # noqa: F401
+    except ImportError:
+        print("  SKIP N（未安装 tree-sitter）")
+        return
+
+    src = tmp / "tail_comment.js"
+    src.write_text(
+        "const MAX = 3;  // 行尾注释紧贴下一个函数\n"
+        "function alpha(a) {\n"
+        "  return a + MAX;\n"
+        "}\n"
+        "\n"
+        "function beta() {\n"
+        "  return alpha(1);\n"
+        "}\n", encoding="utf-8")
+    out = tmp / "tail_chunks"
+    r = subprocess.run([sys.executable, "chunk_js.py", str(src),
+                        "--out", str(out), "--max-lines", "40", "--no-git",
+                        "--force"], cwd=ROOT, capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    check("N1 切分成功", r.returncode == 0, r.stderr[-200:])
+    if r.returncode != 0:
+        return
+    man = _json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    check("N2 行尾注释没把上一条语句吞进 body（preamble 应为 1）",
+          man["preamble_lines"] == 1, str(man["preamble_lines"]))
+    check("N3 首块从函数行开始", man["chunks"][0]["start_line"] == 2,
+          str(man["chunks"][0]["start_line"]))
+    text = (out / man["chunks"][0]["file"]).read_text(encoding="utf-8")
+    check("N4 前导区里还留着那条 const",
+          "const MAX = 3" in text.split("function alpha")[0])
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -633,6 +681,7 @@ def main():
         test_blindtest_regression(tmp)
         test_manifest_v2(tmp)
         test_symbol_dispatch(tmp)
+        test_js_trailing_comment(tmp)
 
     print(f"\n{'=' * 50}")
     print(f"通过 {len(PASSES)} · 失败 {len(FAILS)}")

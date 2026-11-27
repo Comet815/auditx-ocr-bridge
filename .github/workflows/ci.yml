@@ -22,10 +22,10 @@ jobs:
           python-version: ${{ matrix.python }}
 
       - name: 语法检查
-        run: python -m py_compile ocr_adapter.py chunk_big.py chunk_js.py js_symbols.py
+        run: python -m py_compile ocr_adapter.py chunk_big.py chunk_js.py chunk_ts.py chunk_vue.py js_symbols.py
 
-      - name: 安装 JS 解析依赖
-        run: python -m pip install --quiet tree_sitter tree_sitter_javascript
+      - name: 安装 JS/TS 解析依赖
+        run: python -m pip install --quiet tree_sitter tree_sitter_javascript tree_sitter_typescript
 
       - name: 自检
         run: python tests/test_bridge.py

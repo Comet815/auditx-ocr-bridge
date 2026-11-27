@@ -24,7 +24,16 @@ import tempfile
 from pathlib import Path
 
 
+def _ts_parsers():
+    """返回 [(名字, Parser)]；typescript 先，tsx 兜底（JSX 只在 tsx 语法里合法）"""
+    from tree_sitter import Language, Parser
+    import tree_sitter_typescript as tst
+    return [("typescript", Parser(Language(tst.language_typescript()))),
+            ("tsx", Parser(Language(tst.language_tsx())))]
+
+
 def parse_ok(text: str, language: str) -> tuple[bool, str]:
+    data = text.encode("utf-8")
     if language == "python":
         import ast
         try:
@@ -32,17 +41,45 @@ def parse_ok(text: str, language: str) -> tuple[bool, str]:
             return True, ""
         except SyntaxError as ex:
             return False, f"SyntaxError 行{ex.lineno}: {ex.msg}"
+
     if language == "javascript":
         try:
             from tree_sitter import Language, Parser
             import tree_sitter_javascript as tsj
         except ImportError as ex:
             return True, f"跳过（缺 tree-sitter：{ex}）"
-        parser = Parser(Language(tsj.language()))
-        tree = parser.parse(text.encode("utf-8"))
-        if tree.root_node.has_error:
-            return False, "tree-sitter 报语法错误"
+        tree = Parser(Language(tsj.language())).parse(data)
+        return (not tree.root_node.has_error), ("tree-sitter 报语法错误"
+                                                if tree.root_node.has_error else "")
+
+    if language == "typescript":
+        try:
+            parsers = _ts_parsers()
+        except ImportError as ex:
+            return True, f"跳过（缺 tree_sitter_typescript：{ex}）"
+        if not any(p.parse(data).root_node.has_error is False for _, p in parsers):
+            return False, "typescript/tsx 两种语法都报错"
         return True, ""
+
+    if language == "vue":
+        # SFC 的块本身是 script 内容：JS 或 TS 都可能，任一能解析就算过
+        candidates = []
+        try:
+            from tree_sitter import Language, Parser
+            import tree_sitter_javascript as tsj
+            candidates.append(("javascript", Parser(Language(tsj.language()))))
+        except ImportError:
+            pass
+        try:
+            candidates += _ts_parsers()
+        except ImportError:
+            pass
+        if not candidates:
+            return True, "跳过（缺 tree-sitter）"
+        if any(not p.parse(data).root_node.has_error for _, p in candidates):
+            return True, ""
+        return False, "JS/TS 语法都解析不了"
+
     return True, f"跳过（未知语言 {language}）"
 
 

@@ -98,6 +98,14 @@ def extended_start(node, siblings: list, idx: int) -> int:
     JSDoc 和装饰器是节点的一部分语义：留在外面会被前导区或上一块带走，
     模型看到的就是被改写的代码（Python 版 effective_start 修的是同一件事）。
     只并「相邻」的兄弟节点，不跨空行、不越过前一个兄弟的结尾。
+
+    ⚠ 行尾注释不算前导注释（2026-11-27 修）：
+        const MAX = 3;   // 行尾注释紧贴下一行
+        function alpha(a) { … }
+    `// 行尾注释` 与 `function` 行行相邻，但它属于**上一条语句**。并进来的后果是
+    那一行被吞进本块 body、同时从所有其他块的前导区消失，preamble_lines 跟着少算——
+    别的块里就会缺这个常量，模型报「MAX 未定义」，正是本桥要消灭的假阳性。
+    判据：注释的起始行必须晚于**再前一个兄弟**的结束行。
     """
     start, _ = node_lines(node)
     j = idx - 1
@@ -105,10 +113,14 @@ def extended_start(node, siblings: list, idx: int) -> int:
         sib = siblings[j]
         if sib.type not in ("comment", "decorator"):
             break
-        _, sib_end = node_lines(sib)
+        sib_start, sib_end = node_lines(sib)
         if sib_end != start - 1:
             break
-        start, _ = node_lines(sib)
+        if j - 1 >= 0:
+            _, prev_end = node_lines(siblings[j - 1])
+            if sib_start <= prev_end:      # 与上一条语句同行 → 行尾注释，别并
+                break
+        start = sib_start
         j -= 1
     return start
 
@@ -241,6 +253,14 @@ def collect_items(src_text: str, max_lines: int = DEFAULT_MAX_LINES):
                     items.append((s, e, member_label(lhs, src_bytes), None))
         # 其余顶层语句（import、普通调用、纯数据声明）不单独成块
 
+    if not items:
+        # 没有任何函数 / 类 / export 可切：例如只声明常量的模块，
+        # 或 SFC 的 <script setup> 里全是 import 与数据。
+        # 这时**不能返回空**——空 = 这个文件静默逃过审查，谁也不知道它没被看过。
+        # 退化策略：把顶层语句各自当单元，交给 merge_items 合并到 max_lines。
+        for node in kids:
+            s0, e0 = node_lines(node)
+            items.append((s0, e0, "top", None))
     if not items:
         return [], len(src_text.splitlines())
     preamble_end = min(it[0] for it in items) - 1

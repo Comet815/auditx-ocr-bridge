@@ -89,10 +89,9 @@ def truth_line(marker: str) -> int:
 
 def main() -> int:
     sys.path.insert(0, str(HERE))
-    # 集成适配：本仓把 selftest 放在 tests/、chunk_js.py 放在仓根，
-    # 所以她本机"同目录"的假设要补一条路径（逻辑未改）
+    # 集成适配：本仓把 selftest 放在 tests/、chunk_*.py 放在仓根，补一条路径（逻辑未改）
     sys.path.insert(0, str(CHUNK_JS.parent))
-    import chunk_js  # noqa: E402  （导入被测模块做重解析自检）
+    import chunk_js  # noqa: E402  （同目录导入被测模块做重解析自检）
 
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
@@ -236,6 +235,182 @@ def main() -> int:
     check("S19 样本符号含类方法名",
           {"login", "Store", "load", "save", "clear", "size", "helper"} <= fgot,
           f"实得 {sorted(fgot)}")
+
+    # ── TS 节：chunk_ts 切分 + TS 符号（期望对源文件真值） ─────────────────
+    import chunk_ts  # noqa: E402
+
+    TS_LINES = [
+        "import { A } from 'm';",
+        "export interface User { id: number; load(id: number): Promise<void>; }",
+        "export type ID = string | number;",
+        "export enum Color { Red, Green = 2 }",
+        "const CONF: number = 1;",
+        "export abstract class Base<T> {",
+        "  private count: number = 0;",
+        "  protected abstract load(id: ID): Promise<User>;",
+        "  constructor(private db: object, readonly name: string) {}",
+        "  async fetch(id: ID): Promise<T | null> {",
+        "    const x = 1; // MARK_TS_FETCH",
+        "    return null;",
+        "  }",
+        "  clear() { this.count = 0; }",
+        "}",
+        "export function make<T extends object>(x: T): T { return x; }",
+    ]
+    TS_FIXTURE = "\n".join(TS_LINES) + "\n"
+
+    def ts_truth(marker: str) -> int:
+        for i, ln in enumerate(TS_LINES, 1):
+            if marker in ln:
+                return i
+        raise AssertionError(marker)
+
+    with tempfile.TemporaryDirectory() as td4:
+        td4 = Path(td4)
+        tsrc = td4 / "smoke.ts"
+        tsrc.write_text(TS_FIXTURE, encoding="utf-8")
+        tout = td4 / ".chunks"
+        r = subprocess.run(
+            [sys.executable, str(CHUNK_JS.parent / "chunk_ts.py"), str(tsrc),
+             "--out", str(tout), "--max-lines", "8", "--no-git"],
+            capture_output=True, text=True)
+        check("T1 chunk_ts 退出码 0", r.returncode == 0,
+              f"rc={r.returncode} stderr={r.stderr.strip()[:200]}")
+        if r.returncode == 0:
+            tman = json.loads((tout / "manifest.json").read_text("utf-8"))
+            check("T2 language=typescript", tman.get("language") == "typescript")
+            check("T3 chunker=chunk_ts",
+                  tman.get("chunker", {}).get("name") == "chunk_ts")
+            check("T4 failed=0", tman.get("failed") == 0)
+            for c in tman["chunks"]:
+                text = (tout / c["file"]).read_text(encoding="utf-8")
+                cl = text.splitlines()
+                check(f"T5 body 逐字相等 {c['file']}",
+                      cl[c["body_start"] - 1:
+                         c["body_start"] - 1 + c["n_lines"]]
+                      == TS_LINES[c["start_line"] - 1: c["end_line"]])
+                check(f"T6 块可重解析 {c['file']}",
+                      not chunk_ts.has_error(
+                          chunk_ts.parse_ts(
+                              text, chunk_ts.lang_for_suffix(".ts")
+                          ).root_node))
+            tline = ts_truth("MARK_TS_FETCH")
+            owner = next((c for c in tman["chunks"]
+                          if c["start_line"] <= tline <= c["end_line"]), None)
+            check("T7 MARK_TS_FETCH 有归属块", owner is not None)
+            if owner is not None:
+                cl = (tout / owner["file"]).read_text(
+                    encoding="utf-8").splitlines()
+                cline = next(i for i, ln in enumerate(cl, 1)
+                             if "MARK_TS_FETCH" in ln)
+                check("T8 MARK_TS_FETCH 回映偏移 0",
+                      cline - owner["body_start"] + owner["start_line"] == tline)
+            iface_line = ts_truth("interface User")
+            check("T9 interface 落在某块内",
+                  any(c["start_line"] <= iface_line <= c["end_line"]
+                      for c in tman["chunks"]))
+        tsyms = js_symbols.collect_js_symbols(tsrc)
+    check("T10 TS 符号必收项",
+          {"A", "User", "ID", "Color", "Red", "Green", "Base", "count",
+           "load", "db", "name", "fetch", "clear", "make", "CONF"} <= tsyms,
+          f"缺 {sorted({'A', 'User', 'ID', 'Color', 'Red', 'Green', 'Base', 'count', 'load', 'db', 'name', 'fetch', 'clear', 'make', 'CONF'} - tsyms)}")
+
+    # TSX：JSX 必须走 tsx 语法（typescript 语法下是 ERROR）
+    with tempfile.TemporaryDirectory() as td5:
+        td5 = Path(td5)
+        xsrc = td5 / "app.tsx"
+        xsrc.write_text(
+            "import React from 'react';\n"
+            "export const App = () => {\n"
+            "  const el = <div className=\"x\">{1}</div>;\n"
+            "  return el;\n"
+            "};\n", encoding="utf-8")
+        xout = td5 / ".chunks"
+        r = subprocess.run(
+            [sys.executable, str(CHUNK_JS.parent / "chunk_ts.py"), str(xsrc),
+             "--out", str(xout), "--no-git"],
+            capture_output=True, text=True)
+        ok = r.returncode == 0 and json.loads(
+            (xout / "manifest.json").read_text("utf-8"))["failed"] == 0
+        check("T11 tsx 含 JSX 可切且全块可解析", ok,
+              f"rc={r.returncode} stderr={r.stderr.strip()[:160]}")
+
+    # ── Vue 节：chunk_vue 的 .vue 坐标（真值 = .vue 文件本身） ─────────────
+    VUE_LINES = [
+        "<template>",
+        "  <view><text>{{ title }}</text></view>",
+        "</template>",
+        "<script>",
+        "import { ref } from 'vue';",
+        "const CONF = { pageSize: 20 }; // MARK_VUE_PRE",
+        "export default {",
+        "  methods: {",
+        "    async load(id) {",
+        "      return await db.get(id); // MARK_VUE_LOAD",
+        "    }",
+        "  }",
+        "};",
+        "function helper(a) { return a + 1; }",
+        "</script>",
+        "<script setup>",
+        "const extra = 1;",
+        "</script>",
+    ]
+    VUE_FIXTURE = "\n".join(VUE_LINES) + "\n"
+
+    def vue_truth(marker: str) -> int:
+        for i, ln in enumerate(VUE_LINES, 1):
+            if marker in ln:
+                return i
+        raise AssertionError(marker)
+
+    with tempfile.TemporaryDirectory() as td6:
+        td6 = Path(td6)
+        vsrc = td6 / "page.vue"
+        vsrc.write_text(VUE_FIXTURE, encoding="utf-8")
+        vout = td6 / ".chunks"
+        r = subprocess.run(
+            [sys.executable, str(CHUNK_JS.parent / "chunk_vue.py"), str(vsrc),
+             "--out", str(vout), "--no-git"],
+            capture_output=True, text=True)
+        check("V1 chunk_vue 退出码 0", r.returncode == 0,
+              f"rc={r.returncode} stderr={r.stderr.strip()[:200]}")
+        if r.returncode == 0:
+            vman = json.loads((vout / "manifest.json").read_text("utf-8"))
+            check("V2 language=vue", vman.get("language") == "vue")
+            check("V3 第二个 script 块有显式 warnings",
+                  bool(vman.get("warnings")) and
+                  "script setup" in vman["warnings"][0],
+                  str(vman.get("warnings")))
+            for c in vman["chunks"]:
+                cl = (vout / c["file"]).read_text(
+                    encoding="utf-8").splitlines()
+                check(f"V4 body 是 .vue 逐字行 {c['file']}",
+                      cl[c["body_start"] - 1:
+                         c["body_start"] - 1 + c["n_lines"]]
+                      == VUE_LINES[c["start_line"] - 1: c["end_line"]])
+            vline = vue_truth("MARK_VUE_LOAD")
+            owner = next((c for c in vman["chunks"]
+                          if c["start_line"] <= vline <= c["end_line"]), None)
+            check("V5 MARK_VUE_LOAD 有归属块", owner is not None)
+            if owner is not None:
+                cl = (vout / owner["file"]).read_text(
+                    encoding="utf-8").splitlines()
+                cline = next(i for i, ln in enumerate(cl, 1)
+                             if "MARK_VUE_LOAD" in ln)
+                check("V6 MARK_VUE_LOAD 回映 .vue 偏移 0",
+                      cline - owner["body_start"] + owner["start_line"] == vline,
+                      f"回映 {cline - owner['body_start'] + owner['start_line']}"
+                      f" vs 真值 {vline}")
+                # 前导区 1:1 对齐：块文件第 vue 真值行号行就是那行前导代码
+                pre_line = vue_truth("MARK_VUE_PRE")
+                check("V7 前导区与 .vue 行号 1:1 对齐",
+                      "MARK_VUE_PRE" in cl[pre_line - 1],
+                      f"块第 {pre_line} 行是 {cl[pre_line - 1][:40]!r}")
+        vsyms = js_symbols.collect_js_symbols(vsrc)
+    check("V8 .vue 符号抽 script 内容",
+          {"CONF", "load", "helper", "ref"} <= vsyms,
+          f"实得交集 {sorted({'CONF', 'load', 'helper', 'ref'} & vsyms)}")
 
     print(f"\n通过 {len(PASSES)} · 失败 {len(FAILS)}")
     return 0 if not FAILS else 1

@@ -101,7 +101,8 @@ def build_evidence(c: dict, session_id: str | None) -> list[dict]:
 
 # 能保证 body_start 语义的语言。不在这张表里的一律拒绝回映——
 # 宁可让调用方看到"未回映"，也不能给出一个没人验证过的行号。
-SUPPORTED_LANGUAGES = {"python", "javascript"}
+# vue 的 start_line 是 .vue 文件坐标（chunker 负责换算），所以回映公式不变。
+SUPPORTED_LANGUAGES = {"python", "javascript", "typescript", "vue"}
 
 
 class ChunkManifest(dict):
@@ -359,7 +360,8 @@ def extract_identifiers(claim: str) -> list:
     return [x for x in picked if not (x in seen or seen.add(x))]
 
 
-JS_SUFFIXES = {".js", ".mjs", ".cjs", ".jsx"}
+JS_SUFFIXES = {".js", ".mjs", ".cjs", ".jsx",
+               ".ts", ".tsx", ".mts", ".cts", ".vue"}
 
 
 def collect_source_symbols(src_path) -> set:
@@ -378,14 +380,14 @@ def collect_source_symbols(src_path) -> set:
             from js_symbols import collect_js_symbols  # type: ignore
         except ImportError as exc:
             raise SystemExit(
-                f"--source 指向 {p.name}，需要 JS 符号表抽取器 js_symbols.py，但它不在 PYTHONPATH 里。\n"
-                "Python 的 ast 抽不出 JS 符号；没有它，跨块假报过滤会空转——"
+                f"--source 指向 {p.name}，需要 js_symbols.py（JS/TS/Vue 符号表），但它不在 PYTHONPATH 里。\n"
+                "Python 的 ast 抽不出这些语言的符号；没有它，跨块假报过滤会空转——"
                 "宁可明确报错，也不假装过滤过。"
             ) from exc
         return collect_js_symbols(p)
     raise SystemExit(
         f"--source 不支持的语言：{p.name}（{suffix or '无扩展名'}）。"
-        "目前支持 .py（内置）与 .js/.mjs/.cjs/.jsx（需 js_symbols.py）。"
+        "目前支持 .py（内置）与 .js/.mjs/.cjs/.jsx/.ts/.tsx/.mts/.cts/.vue（需 js_symbols.py）。"
     )
 
 
