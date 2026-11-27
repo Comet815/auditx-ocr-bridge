@@ -48,6 +48,29 @@ def total(prices):
 '''
 
 
+def split_cmd(raw: str) -> list[str]:
+    """把 --ocr-cmd 切成分段，跨平台都不出错。
+
+    两个坑都在这里（2026-11-27 实测，见 tests/test_diff_mode_script.py）：
+
+    1. POSIX 模式下 `C:\\\\Users\\\\...` 的反斜杠被当转义符吃掉，
+       整条路径压成 `C:UsersAdministrator...`。
+       → Windows 上必须用非 POSIX 模式。
+    2. 非 POSIX 模式**会把引号留在 token 里**：
+       `'"C:\\\\Python\\\\python.exe" "stub.py"'` 切出来是
+       `['"C:\\\\Python\\\\python.exe"', '"stub.py"']`，
+       subprocess 拿着带引号的名字去找文件，必然找不到。
+       → 切完还要把成对的首尾引号剥掉。
+    """
+    parts = shlex.split(raw, posix=(os.name != "nt"))
+    out: list[str] = []
+    for p in parts:
+        if len(p) >= 2 and p[0] == p[-1] and p[0] in "\"'":
+            p = p[1:-1]
+        out.append(p)
+    return out
+
+
 def run(cmd, cwd=None, **kw):
     """跑一条命令。找不到可执行文件时返回 rc=127 而不是抛异常——
     「工具没装」是环境问题，该走退出码 3，不该变成 traceback。"""
@@ -66,9 +89,9 @@ def main() -> int:
     ap.add_argument("--ocr-cmd", default=os.environ.get("OCR_CMD", "ocr"),
                     help="ocr CLI 命令（默认取 $OCR_CMD 或 ocr）")
     args = ap.parse_args()
-    # Windows 上用非 POSIX 切分，否则 C:\\Users\\... 的反斜杠会被当转义吃掉
-    # （实测 shlex.split 把整条路径压成 C:UsersAdministrator...）。
-    ocr_cmd = shlex.split(args.ocr_cmd, posix=(os.name != "nt"))
+    # 切分口径见 split_cmd：Windows 用非 POSIX 模式（反斜杠不被当转义），
+    # 并剥掉切分后残留的成对引号（非 POSIX 模式会把引号留在 token 里）。
+    ocr_cmd = split_cmd(args.ocr_cmd)
 
     # ── 环境检查：ocr 能跑吗 ────────────────────────────────────────────
     probe = run(ocr_cmd + ["version"])

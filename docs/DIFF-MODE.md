@@ -51,9 +51,12 @@ diff 模式的输出**。11-19 的结论可以在「这个版本、这个形状�
 - 「diff 审查定位比 scan 更准」是 11-19 的对比结论，这次没有重做对比，
   引用时仍按 11-19 的强度写。
 
-## 本轮修掉的两个 Windows 缺陷（实测复现后修）
+## 本轮修掉的三个 Windows 缺陷（实测复现后修，现有测试守）
 
-`qa/regress_diff_mode.py` 初版在 Windows 上有两处会直接崩，均已复现并修：
+`qa/regress_diff_mode.py` 初版在 Windows 上有三处会直接崩，均已复现并修。
+**这三个坑能活下来，根因是同一个：这个脚本从来没进过 CI**——它只在一台 Linux VM
+上跑过一次。所以修完之后，`tests/test_diff_mode_script.py` 用假 ocr 把脚本本体
+接进了 CI 四矩阵（见下节）。
 
 1. **`ocr` 找不到时抛 traceback，而不是干净报环境缺失。**
    npm 装的 `ocr` 是 `ocr.cmd` / `ocr.ps1` 垫片，`subprocess` 不带 shell 解析不了
@@ -65,10 +68,29 @@ diff 模式的输出**。11-19 的结论可以在「这个版本、这个形状�
    `shlex.split(r'C:\Users\A\AppData\Roaming\npm\ocr.cmd')` 的结果是
    `['C:UsersAAppDataRoamingnpmocr.cmd']`——整条路径被压平成一个不存在的名字。
    修法：`shlex.split(..., posix=(os.name != "nt"))`。
+3. **改成非 POSIX 模式后又冒出第三个：引号被留在 token 里。**
+   `shlex.split('"C:\\Python\\python.exe" "stub.py"', posix=False)` 得到
+   `['"C:\\Python\\python.exe"', '"stub.py"']`——subprocess 拿着带引号的
+   可执行名去找文件，必然找不到。只写 `posix=(os.name!="nt")` 会把它修成
+   「另一种失败」，不是修好。修法：切完再把成对的首尾引号剥掉（`split_cmd()`）。
 
 修完复验：裸 `ocr` 场景 rc=3 并打印
 `环境缺失：ocr CLI 不可运行（'ocr'）：找不到可执行文件`；
-反斜杠路径场景 rc=0 拿到上面的真跑结果。
+反斜杠路径、带引号命令、含空格路径场景均 rc=0 拿到上面的真跑结果。
+
+## 这个脚本现在有 CI 覆盖（2026-11-27 补）
+
+`tests/test_diff_mode_script.py`：假 ocr（不碰真模型）驱动脚本本体，15 项断言，
+锁四类行为——
+
+- 退出码语义：链路通过 0 / 模型 0 报 1 / 上游失败或未配模型 3；
+- 缺工具不崩：rc=3 且**不得出现 traceback**；
+- 命令切分：无引号、带引号、路径含空格三种都能起来（上面第 2、3 个坑的回归面）；
+- 探测与失败分支分开：假 ocr 的 `version` 正常、`review` 才失败，确保测的是
+  真分支而不是卡在环境探测（写测试时自己踩过这个）。
+
+**它替代不了真跑**：这条只锁脚本 machinery 与退出码，不证明适配器吃得下真实
+模型输出。真跑证据在上面的表格里，两者分工不同，别互相冒充。
 
 ## 在带模型的机器上复跑
 
