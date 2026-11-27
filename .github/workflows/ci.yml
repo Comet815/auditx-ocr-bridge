@@ -2,6 +2,11 @@ name: test
 
 on:
   push:
+    # docs/STATUS.md 是台账（状态镜像，不是交付物），每天由缪斯直推 main。
+    # 它不改变任何代码，跑四矩阵只是噪音——这里直接跳过。
+    # 注意：只跳这一个文件；台账里若写了假话，靠人核对，不靠 CI。
+    paths-ignore:
+      - 'docs/STATUS.md'
   pull_request:
 
 jobs:
