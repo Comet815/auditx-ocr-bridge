@@ -639,6 +639,31 @@ def test_symbol_dispatch(tmp):
     except SystemExit as e:
         check("M7 .rs 走 rust_symbols", False, str(e)[:60])
 
+    # Go/Rust 的内置名表：缺了它，提到 len/Option 的跨块假报永远过滤不掉
+    # （与 js_symbols.JS_GLOBALS 同一个道理，由缪斯在收工报告里点名）
+    go2 = tmp / "builtin.go"
+    go2.write_text("package p\n\nfunc F(a []int) int { return len(a) }\n",
+                   encoding="utf-8")
+    try:
+        gs = A.collect_source_symbols(go2)
+        check("M8 Go 内置名算已定义（len/string/nil）",
+              {"len", "string", "nil"} <= gs, str(sorted(gs)[:8]))
+        fake_go, _ = A.is_chunk_artifact(
+            {"content": "`len` is not defined in this chunk"}, gs)
+        check("M8b 提到内置名的跨块假报能被过滤", fake_go)
+    except SystemExit as e:
+        check("M8 Go 内置名算已定义（len/string/nil）", False, str(e)[:60])
+
+    rs2 = tmp / "prelude.rs"
+    rs2.write_text("pub fn f(v: Option<u8>) -> Vec<u8> { Vec::new() }\n",
+                   encoding="utf-8")
+    try:
+        rr = A.collect_source_symbols(rs2)
+        check("M9 Rust prelude 算已定义（Option/Vec/String）",
+              {"Option", "Vec", "String"} <= rr, str(sorted(rr)[:8]))
+    except SystemExit as e:
+        check("M9 Rust prelude 算已定义（Option/Vec/String）", False, str(e)[:60])
+
 
 def test_js_trailing_comment(tmp):
     """N：行尾注释不能被当成下一个单元的前导注释（2026-11-27 修）"""

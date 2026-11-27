@@ -25,6 +25,28 @@ from tree_sitter import Language, Parser
 
 _LANG = Language(_tsrs.language())
 
+# std prelude + 常用宏：任何 Rust 文件里都可直接用，不需要 use。
+# 理由同 js_symbols.JS_GLOBALS / go_symbols.GO_BUILTINS：
+# 过滤器的判据是「全部符号已定义」，缺了这张表，提到 Option / Vec / String /
+# println 的跨块假报在 Rust 侧永远过滤不掉。
+RUST_PRELUDE = frozenset({
+    # prelude 里的类型与枚举
+    "Option", "Some", "None", "Result", "Ok", "Err",
+    "Vec", "String", "Box", "Rc", "Arc", "Cell", "RefCell", "Cow",
+    "HashMap", "HashSet", "BTreeMap", "BTreeSet", "VecDeque", "BinaryHeap",
+    "Iterator", "IntoIterator", "Extend", "ExactSizeIterator",
+    "Clone", "Copy", "Debug", "Display", "Default", "PartialEq", "Eq",
+    "PartialOrd", "Ord", "Hash", "Send", "Sync", "Sized", "Unpin", "Drop",
+    "Fn", "FnMut", "FnOnce", "From", "Into", "TryFrom", "TryInto",
+    "AsRef", "AsMut", "ToString", "ToOwned",
+    # 常用宏（按裸名收，模型引用时通常不带 ! ）
+    "panic", "print", "println", "eprint", "eprintln", "format", "vec",
+    "assert", "assert_eq", "assert_ne", "debug_assert", "debug_assert_eq",
+    "todo", "unimplemented", "unreachable", "write", "writeln", "matches", "dbg",
+    # 字面零值
+    "true", "false",
+})
+
 _PATTERN_TYPES = {
     "tuple_pattern", "tuple_struct_pattern", "struct_pattern",
     "reference_pattern", "mut_pattern", "or_pattern", "slice_pattern",
@@ -113,11 +135,17 @@ def _walk(node, src: bytes, out: set[str]):
 
 
 def collect_rust_symbols(path) -> set[str]:
-    """抽取 Rust 源文件的符号表 → set[str]（契约函数）"""
+    """抽取 Rust 源文件的符号表 → set[str]（契约函数）
+
+    返回值包含 **prelude**（std 预导入的名字）与常用宏：它们在任何 Rust 文件里
+    都可直接使用，不需要 `use`。少了这张表，任何提到 Option / Vec / String /
+    println 的断言在 Rust 侧永远满足不了「全部符号已定义」，跨块假报过滤不掉。
+    """
     src = Path(path).read_bytes()
     tree = Parser(_LANG).parse(src)
     out: set[str] = set()
     _walk(tree.root_node, src, out)
+    out |= RUST_PRELUDE
     return out
 
 

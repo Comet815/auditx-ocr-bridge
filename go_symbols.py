@@ -30,6 +30,23 @@ from tree_sitter import Language, Parser
 
 _LANG = Language(_tsgo.language())
 
+# Go 的预声明标识符（builtin 函数 / 预声明类型 / 常量）。
+# 理由与 js_symbols.JS_GLOBALS 完全相同：过滤器的判据是「**全部**符号已定义」，
+# 而这些名字本来就不需要声明。少了这张表，任何提到 len / append / string / nil 的
+# 断言在 Go 侧永远满足不了这个条件——跨块假报永远过滤不掉，是系统性失灵。
+GO_BUILTINS = frozenset({
+    # builtin 函数
+    "append", "cap", "clear", "close", "complex", "copy", "delete", "imag",
+    "len", "make", "max", "min", "new", "panic", "print", "println", "real",
+    "recover",
+    # 预声明类型
+    "any", "bool", "byte", "comparable", "complex64", "complex128", "error",
+    "float32", "float64", "int", "int8", "int16", "int32", "int64", "rune",
+    "string", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
+    # 预声明常量与零值
+    "true", "false", "iota", "nil",
+})
+
 
 def _text(node, src: bytes) -> str:
     return src[node.start_byte:node.end_byte].decode("utf-8", "replace")
@@ -81,11 +98,17 @@ def _walk(node, src: bytes, out: set[str]):
 
 
 def collect_go_symbols(path) -> set[str]:
-    """抽取 Go 源文件的符号表 → set[str]（契约函数）"""
+    """抽取 Go 源文件的符号表 → set[str]（契约函数）
+
+    返回值包含预声明标识符（GO_BUILTINS）：它们在任何 Go 文件里都可直接用，
+    不需要声明。缺了它们，"全部符号已定义"对提到 len/append/string 的断言
+    永远不成立，跨块假报过滤不掉。
+    """
     src = Path(path).read_bytes()
     tree = Parser(_LANG).parse(src)
     out: set[str] = set()
     _walk(tree.root_node, src, out)
+    out |= GO_BUILTINS
     return out
 
 

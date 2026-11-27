@@ -327,13 +327,16 @@ _UNDEF_PAT = re.compile(
 
 
 def _usable(name: str) -> bool:
-    """能不能当"被点名的符号"：太短、太常见、是内置名，都不算"""
+    """能不能当"被点名的符号"：太短、太常见的虚词都不算。
+
+    注意**不能**用 Python 的 builtins 来排除：符号表是跨语言的，Python 恰好有
+    `len`，而 Go 也有 `len` —— 用 Python 的内置名去过滤，会把 Go 的 `len` 当成
+    "不是符号"扔掉（2026-11-27 实测踩到，M8b）。每种语言的"永远可用名"由它自己的
+    符号表负责（JS_GLOBALS / GO_BUILTINS / RUST_PRELUDE / Python 的 builtins）。
+    """
     if not name or len(name) <= 2:
         return False
-    if name.lower() in _STOPWIDTH:
-        return False
-    # 内置名（NameError / ValueError …）不算"缺失的符号"
-    return not hasattr(builtins, name)
+    return name.lower() not in _STOPWIDTH
 
 
 def extract_identifiers(claim: str) -> list:
@@ -441,6 +444,10 @@ def _collect_python_symbols(src_path: Path) -> set:
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             for a in node.names:
                 names.add((a.asname or a.name).split(".")[0])
+    # Python 侧同样要带"永远可用名"：内置函数与内置类型。
+    # 理由与 JS_GLOBALS / GO_BUILTINS / RUST_PRELUDE 一致——缺了它，
+    # 提到 len / str / isinstance 的断言永远满足不了"全部符号已定义"。
+    names |= set(dir(builtins))
     return names
 
 
