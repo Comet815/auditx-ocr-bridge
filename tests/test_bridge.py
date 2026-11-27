@@ -705,6 +705,68 @@ def test_js_trailing_comment(tmp):
           "const MAX = 3" in text.split("function alpha")[0])
 
 
+def test_ocr_golden(tmp):
+    """O：真实 OCR 输出的金样例（桥 ↔ OCR 接缝）
+
+    CI 里没有 API key，跑不了真 OCR。所以把**一次真实 OCR 的输出**存成夹具，
+    在 CI 里固定验证"适配器吃真实输出"这一段：字段解析、假报过滤、回映、
+    严重度/维度映射是否与当时一致。
+
+    边界（必须写清）：这**不**覆盖账本与 V11——审查庭引擎是私有组件，不进公开仓 CI。
+    全链验证只在本机手工做过（见 README 与收工报告）。
+
+    夹具是冻结的：改了 tests/fixtures/js/sample.js 或 chunker 的命名规则，
+    这份 golden 会红，那是提醒你同步重录，不是 bug。
+    """
+    print("\n[O] 真实 OCR 金样例")
+    import ocr_adapter as A
+
+    ocr_fixture = ROOT / "tests" / "fixtures" / "ocr" / "sample_js_worker.json"
+    js_src = ROOT / "tests" / "fixtures" / "js" / "sample.js"
+    if not ocr_fixture.exists():
+        print("  SKIP O（金样例缺失）")
+        return
+    try:
+        import tree_sitter_javascript  # noqa: F401
+    except ImportError:
+        print("  SKIP O（未安装 tree-sitter）")
+        return
+
+    # 用同一份源文件、同样的参数重切，manifest 的块名必须与录制时一致
+    out = tmp / "golden_chunks"
+    r = run([sys.executable, "chunk_js.py", str(js_src), "--out", str(out),
+             "--max-lines", "20", "--no-git", "--force"])
+    check("O1 重切成功", r.returncode == 0, r.stderr[-200:])
+    if r.returncode != 0:
+        return
+
+    manifest = A.load_chunk_manifest(out / "manifest.json")
+    data = A.load_ocr_json(ocr_fixture)
+    symbols = A.collect_source_symbols(js_src)
+    res = A.convert(data, "sample.js", manifest, "sample.js", symbols)
+
+    st = res["stats"]
+    check("O2 真实 OCR 输出可解析", st["comments_total"] == 3,
+          str(st["comments_total"]))
+    check("O3 假报过滤生效（3 条评论留下 1 条跨块假报）",
+          st["dropped_chunk_artifacts"] == 1, str(st["dropped_chunk_artifacts"]))
+    check("O4 入库条数", st["converted"] == 2, str(st["converted"]))
+
+    locs = sorted(f["locator"] for f in res["findings"])
+    check("O5 locator 与录制时一致",
+          locs == ["sample.js:3", "sample.js:37"], str(locs))
+
+    rs = st["remap"]
+    check("O6 回映统计一致（1 正常 + 1 前导区 + basename 兜底 2）",
+          (rs["remapped"], rs["preamble"], rs["basename_matched"]) == (1, 1, 2),
+          f'{rs["remapped"]}/{rs["preamble"]}/{rs["basename_matched"]}')
+
+    sev = {f["locator"]: (f["severity"], f["dimension"]) for f in res["findings"]}
+    check("O7 严重度与维度映射一致",
+          sev.get("sample.js:3") == ("MINOR", "quality")
+          and sev.get("sample.js:37") == ("MAJOR", "logic"), str(sev))
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -724,6 +786,7 @@ def main():
         test_manifest_v2(tmp)
         test_symbol_dispatch(tmp)
         test_js_trailing_comment(tmp)
+        test_ocr_golden(tmp)
 
     print(f"\n{'=' * 50}")
     print(f"通过 {len(PASSES)} · 失败 {len(FAILS)}")

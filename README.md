@@ -224,6 +224,13 @@ python qa/regress_chunker.py --cmd "python chunk_js.py" --target tests/fixtures/
 
 这条比"跑通不报错"强：分段器可以跑通却把行号算错，而几何真值只有拿源文件比才看得出来。
 
+另有一组**真实 OCR 金样例**（`tests/fixtures/ocr/`）：把一次真实 OCR 输出冻结成夹具，
+CI 里固定验证"适配器吃真实输出"这一段（字段解析、假报过滤、回映、严重度映射）。
+
+> 边界：这**不覆盖账本与 V11**——审查庭引擎是私有组件，不进公开仓 CI。
+> 全链（桥 → 适配器 → 账本 → V11）只在本机手工验过（Python / JS / Vue / Go / Rust 各有一次）。
+> 金样例是冻结的：改了对应夹具或 chunker 命名规则，它会红，那是提醒你重录，不是 bug。
+
 ---
 
 ## License

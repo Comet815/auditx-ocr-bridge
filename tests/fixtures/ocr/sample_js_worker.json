@@ -1,0 +1,67 @@
+[ocr] full-scan: 1 file(s) discovered, reviewing 1 in D:\AI\workspace\_tmp\golden_ocr
+[ocr] estimated cost: ~1 file(s), est. 20K input + 7K output ≈ 27K total tokens (rough; actual reported after run)
+[ocr] scan dispatch: 1 batch(es) by by-language strategy
+[ocr]   ▶ code_search search_text=alpha file_patterns=[*.js *.ts *.jsx *.tsx]
+[ocr]   ✔ code_search (81ms)
+[ocr]   ▶ code_search search_text=function beta
+[ocr]   ✔ code_search (82ms)
+[ocr]   ▶ code_comment
+[ocr]   ✔ code_comment (0s)
+{
+  "status": "success",
+  "llm": {
+    "provider": "deepseek",
+    "model": "deepseek-chat"
+  },
+  "summary": {
+    "files_reviewed": 1,
+    "comments": 3,
+    "total_tokens": 12527,
+    "input_tokens": 11440,
+    "output_tokens": 1087,
+    "cache_read_tokens": 9472,
+    "elapsed": "9s"
+  },
+  "tool_calls": {
+    "total": 3,
+    "by_tool": {
+      "code_comment": 1,
+      "code_search": 2
+    },
+    "failure": 0,
+    "failure_by_tool": {},
+    "failure_details": []
+  },
+  "comments": [
+    {
+      "path": ".chunks/chunk_02_Worker.js",
+      "content": "`fs` is imported but never used (dead code). Also `CONFIG` is declared but never referenced; remove it or use it.",
+      "existing_code": "import fs from 'fs';",
+      "start_line": 3,
+      "end_line": 3,
+      "category": "maintainability",
+      "severity": "medium"
+    },
+    {
+      "path": ".chunks/chunk_02_Worker.js",
+      "content": "`beta` is called here but is not defined/imported in this module, so `run()` will fail at runtime with a ReferenceError. Make sure `beta` is imported from its source module.",
+      "existing_code": "    return beta(MAX);",
+      "start_line": 15,
+      "end_line": 15,
+      "category": "bug",
+      "severity": "medium"
+    },
+    {
+      "path": ".chunks/chunk_02_Worker.js",
+      "content": "This file exports `alpha` and `beta`, but neither is imported or declared in this file — they are defined in `chunk_01_alpha.js`/`sample.js`. As written, `export { alpha, beta, MAX }` and the `beta(MAX)` call inside `run()` will throw `ReferenceError` at runtime (syntax/`Export 'alpha' is not defined` error), and `fs` is imported but never used. Either import the missing symbols or remove them from the export list.",
+      "suggestion_code": "export { MAX };",
+      "existing_code": "export { alpha, beta, MAX };",
+      "start_line": 25,
+      "end_line": 25,
+      "category": "bug",
+      "severity": "high"
+    }
+  ],
+  "project_summary": "### Top Issues\n\n1. **Undefined identifiers exported and called at runtime** — `.chunks/chunk_02_Worker.js` exports `alpha` and `beta` (in `export { alpha, beta, MAX }`) and invokes `beta(MAX)` inside `run()`, but neither symbol is imported or declared in the file. This produces a `ReferenceError`/`SyntaxError` at load or first call. Root cause: the module appears to have been split/refactored without adding the corresponding imports. This is the single blocking defect for the scanned chunk.\n\n2. **Duplicate root cause across multiple comment lines** — the `beta` undefined-symbol problem is flagged independently for the export statement and again for the `run()` call site. Both trace to the same missing import, so fixing the import resolves all three related findings at once.\n\n3. **Dead code / unused declarations** — `fs` is imported but unused, and `CONFIG` is declared but never referenced in `.chunks/chunk_02_Worker.js`. Low severity but indicates drift between the file and its original source.\n\n### Module Hotspots\n\n- **`.chunks/`** — the only directory with findings, and specifically `chunk_02_Worker.js`, which accounts for 100% of comments. The severity is concentrated on a single file rather than spread across the tree.\n\n### Cross-Cutting Concerns\n\n- **Incomplete module extraction across chunks** — the `alpha`/`beta` dependency and the comparison to `chunk_01_alpha.js`/`sample.js` suggest chunked files are not self-contained: symbols are referenced from sibling chunks without import wiring. Representative path: `.chunks/chunk_02_Worker.js`.\n- **Unused imports and constants accumulating in generated/split files** — same path; typical of files produced by mechanical splitting where the original header was preserved wholesale.\n\n### Quick Wins\n\n- Add the missing `import { alpha, beta } from './chunk_01_alpha.js'` (or the correct source module) to `.chunks/chunk_02_Worker.js` — resolves the export error and the `run()` ReferenceError in one change.\n- Delete the unused `fs` import and `CONFIG` constant, or wire `CONFIG` into `run()` if it was intended for use.\n- Since only one file was scanned and it is a chunk, verify the extraction tooling copies import headers correctly to prevent recurrence in other `chunk_*` files.",
+  "session_id": "004684ba-810e-459f-8833-370bd0c84c07"
+}
