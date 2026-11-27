@@ -191,8 +191,12 @@ def main(argv=None) -> int:
               "拒绝清空。确认要覆盖请加 --force。", file=sys.stderr)
         return 2
 
+    # utf-8-sig：Windows 上不少编辑器（和中文环境的不少默认设置）存 .py 带 BOM。
+    # ast.parse() 吃 str 时会因行首 U+FEFF 报 SyntaxError（2026-11-27 实测：
+    # Python + BOM → 整份文件切不出块，其他五种语言因为走 tree-sitter 都不受影响）。
+    # 读的时候剥掉 BOM；BOM 是第 1 行的字节序标记、不占行号，所以几何不受影响。
     try:
-        src_text = src.read_text(encoding="utf-8")
+        src_text = src.read_text(encoding="utf-8-sig")
     except UnicodeDecodeError:
         print(f"源文件不是合法的 UTF-8 文本，无法切分: {src}", file=sys.stderr)
         return 2

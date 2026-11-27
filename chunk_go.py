@@ -264,8 +264,9 @@ def main(argv=None) -> int:
               "拒绝清空。确认要覆盖请加 --force。", file=sys.stderr)
         return 2
 
+    # 同其他分段器：带 BOM 的 .go 读进来就剥掉，块体里不留 U+FEFF。
     try:
-        src_text = src.read_text(encoding="utf-8")
+        src_text = src.read_text(encoding="utf-8-sig")
     except UnicodeDecodeError:
         print(f"源文件不是合法的 UTF-8 文本，无法切分: {src}", file=sys.stderr)
         return 2

@@ -33,9 +33,19 @@ jobs:
       - name: JS 分段器自测
         run: python tests/selftest_js.py chunk_js.py
 
+      # 输入变体：BOM / CRLF / 无尾换行 × 六种语言（运行时生成，不存二进制夹具）。
+      # 2026-11-27 抽查发现这条路一直是「碰巧能过」，Python + BOM 当场就挂。
+      - name: 输入编码与换行变体
+        run: python tests/test_input_encodings.py
+
       # --post 的字段契约走真实 CLI 子进程（假引擎），不需要私有引擎。
       - name: --post 字段契约
         run: python tests/test_post_contract.py
+
+      # diff 模式回归脚本自身的回归（假 ocr）：锁退出码语义与命令切分，
+      # 三个 Windows 坑就是在这条链上活下来的（脚本本身从没进过 CI）。
+      - name: diff 模式脚本回归（假 ocr）
+        run: python tests/test_diff_mode_script.py
 
       # 几何真值：不是"分段器自己说自己对"，而是拿源文件逐字比对 body_start 指向的行。
       # 强制 --max-lines 20 是为了真正走到"类/方法被切开"那条路径——默认 240 行时
@@ -49,6 +59,11 @@ jobs:
           python qa/regress_chunker.py --cmd "python chunk_vue.py" --target tests/fixtures/vue    --ext .vue --max-lines 20
           python qa/regress_chunker.py --cmd "python chunk_go.py"  --target tests/fixtures/go     --ext .go  --max-lines 20
           python qa/regress_chunker.py --cmd "python chunk_rust.py" --target tests/fixtures/rust  --ext .rs  --max-lines 20
+
+      # 鲁棒性：损坏/畸形源文件绝不 traceback。语料运行时生成，每个文件独立子进程。
+      # 这一条是缪斯 2026-11-27 交的（三类真崩溃：二进制垃圾、200 层嵌套、语法损坏）。
+      - name: 损坏源文件鲁棒性
+        run: python qa/regress_robustness.py
 
       - name: 分段器在真实大文件上无报错（3.12 只跑一次）
         if: matrix.python == '3.12' && matrix.os == 'ubuntu-latest'

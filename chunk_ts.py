@@ -373,8 +373,9 @@ def main(argv=None) -> int:
 
     lang = lang_for_suffix(suffix)
     chunk_ext = ".tsx" if suffix == ".tsx" else ".ts"
+    # 同 chunk_js：带 BOM 的源文件读进来就剥掉，别让 U+FEFF 混进块体。
     try:
-        src_text = src.read_text(encoding="utf-8")
+        src_text = src.read_text(encoding="utf-8-sig")
     except UnicodeDecodeError:
         print(f"源文件不是合法的 UTF-8 文本，无法切分: {src}", file=sys.stderr)
         return 2
