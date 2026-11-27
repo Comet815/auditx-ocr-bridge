@@ -368,7 +368,8 @@ def main(argv=None) -> int:
 
     lang = lang_for_suffix(suffix)
     chunk_ext = ".tsx" if suffix == ".tsx" else ".ts"
-    src_text = src.read_text(encoding="utf-8")
+    # 同 chunk_js：带 BOM 的源文件读进来就剥掉，别让 U+FEFF 混进块体。
+    src_text = src.read_text(encoding="utf-8-sig")
     if has_error(parse_ts(src_text, lang).root_node):
         print("源文件本身解析就有 ERROR 节点（.tsx 请确认后缀，JSX 需 tsx 语法）",
               file=sys.stderr)

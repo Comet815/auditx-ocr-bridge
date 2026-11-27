@@ -191,7 +191,11 @@ def main(argv=None) -> int:
               "拒绝清空。确认要覆盖请加 --force。", file=sys.stderr)
         return 2
 
-    src_text = src.read_text(encoding="utf-8")
+    # utf-8-sig：Windows 上不少编辑器（和中文环境的不少默认设置）存 .py 带 BOM。
+    # ast.parse() 吃 str 时会因行首 U+FEFF 报 SyntaxError（2026-11-27 实测：
+    # Python + BOM → 整份文件切不出块，其他五种语言因为走 tree-sitter 都不受影响）。
+    # 读的时候剥掉 BOM；BOM 是第 1 行的字节序标记、不占行号，所以几何不受影响。
+    src_text = src.read_text(encoding="utf-8-sig")
     lines = src_text.splitlines()
     pre_end = preamble_end(src_text)
     merged = merge_items(collect_items(src_text, args.max_lines), args.max_lines)
