@@ -73,9 +73,14 @@ def parse_ts(text: str, lang):
 
 
 def has_error(node) -> bool:
-    if node.type == "ERROR" or node.is_missing:
-        return True
-    return any(has_error(c) for c in node.children)
+    # 迭代实现：递归版在深嵌套文件上会 RecursionError
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if n.type == "ERROR" or n.is_missing:
+            return True
+        stack.extend(n.children)
+    return False
 
 
 def node_lines(node) -> tuple[int, int]:
@@ -368,7 +373,11 @@ def main(argv=None) -> int:
 
     lang = lang_for_suffix(suffix)
     chunk_ext = ".tsx" if suffix == ".tsx" else ".ts"
-    src_text = src.read_text(encoding="utf-8")
+    try:
+        src_text = src.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        print(f"源文件不是合法的 UTF-8 文本，无法切分: {src}", file=sys.stderr)
+        return 2
     if has_error(parse_ts(src_text, lang).root_node):
         print("源文件本身解析就有 ERROR 节点（.tsx 请确认后缀，JSX 需 tsx 语法）",
               file=sys.stderr)

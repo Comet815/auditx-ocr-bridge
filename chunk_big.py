@@ -191,10 +191,18 @@ def main(argv=None) -> int:
               "拒绝清空。确认要覆盖请加 --force。", file=sys.stderr)
         return 2
 
-    src_text = src.read_text(encoding="utf-8")
+    try:
+        src_text = src.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        print(f"源文件不是合法的 UTF-8 文本，无法切分: {src}", file=sys.stderr)
+        return 2
     lines = src_text.splitlines()
-    pre_end = preamble_end(src_text)
-    merged = merge_items(collect_items(src_text, args.max_lines), args.max_lines)
+    try:
+        pre_end = preamble_end(src_text)
+        merged = merge_items(collect_items(src_text, args.max_lines), args.max_lines)
+    except SyntaxError as e:
+        print(f"源文件语法错误，无法切分: {e}", file=sys.stderr)
+        return 2
 
     force_rm(out)
     out.mkdir(parents=True)

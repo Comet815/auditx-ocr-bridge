@@ -153,7 +153,11 @@ def main(argv=None) -> int:
               "拒绝清空。确认要覆盖请加 --force。", file=sys.stderr)
         return 2
 
-    vue_text = src.read_text(encoding="utf-8")
+    try:
+        vue_text = src.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        print(f"源文件不是合法的 UTF-8 文本，无法切分: {src}", file=sys.stderr)
+        return 2
     vue_lines = vue_text.splitlines()
     try:
         blocks = extract_script_blocks(vue_text)
