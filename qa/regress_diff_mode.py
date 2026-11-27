@@ -49,7 +49,16 @@ def total(prices):
 
 
 def run(cmd, cwd=None, **kw):
-    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, **kw)
+    """跑一条命令。找不到可执行文件时返回 rc=127 而不是抛异常——
+    「工具没装」是环境问题，该走退出码 3，不该变成 traceback。"""
+    try:
+        return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, **kw)
+    except FileNotFoundError as e:
+        return subprocess.CompletedProcess(
+            cmd, 127, "", f"找不到可执行文件 {cmd[0]!r}：{e.strerror}")
+    except OSError as e:
+        return subprocess.CompletedProcess(
+            cmd, 127, "", f"无法执行 {cmd[0]!r}：{e.strerror}")
 
 
 def main() -> int:
@@ -57,7 +66,9 @@ def main() -> int:
     ap.add_argument("--ocr-cmd", default=os.environ.get("OCR_CMD", "ocr"),
                     help="ocr CLI 命令（默认取 $OCR_CMD 或 ocr）")
     args = ap.parse_args()
-    ocr_cmd = shlex.split(args.ocr_cmd)
+    # Windows 上用非 POSIX 切分，否则 C:\\Users\\... 的反斜杠会被当转义吃掉
+    # （实测 shlex.split 把整条路径压成 C:UsersAdministrator...）。
+    ocr_cmd = shlex.split(args.ocr_cmd, posix=(os.name != "nt"))
 
     # ── 环境检查：ocr 能跑吗 ────────────────────────────────────────────
     probe = run(ocr_cmd + ["version"])
