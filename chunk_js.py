@@ -207,10 +207,12 @@ def collect_items(src_text: str, max_lines: int = DEFAULT_MAX_LINES):
             else:
                 items.append((ext_start, e0, whole_label, None))
 
+    first_unit: int | None = None
     for i, node in enumerate(kids):
         t = node.type
         s = extended_start(node, kids, i)
         _, e = node_lines(node)
+        n_before = len(items)
         if t in FUNC_DECL_TYPES:
             items.append((s, e, name_of(node, src_bytes) or "func", None))
         elif t == "class_declaration":
@@ -252,6 +254,13 @@ def collect_items(src_text: str, max_lines: int = DEFAULT_MAX_LINES):
                     # exports.main = … / X.prototype.m = … / obj.m = …
                     items.append((s, e, member_label(lhs, src_bytes), None))
         # 其余顶层语句（import、普通调用、纯数据声明）不单独成块
+        if len(items) > n_before and first_unit is None:
+            # 前导区基准 = 第一个产出单元的**顶层节点**起点。被拆成方法的类，
+            # 基准是 class 行本身——若误取第一个方法的行号，`class X {` 会
+            # 掉进前导区被补进每一块：方法块出现双 class 头、顶层块挂着未
+            # 闭合的 class，所有块解析失败。class-first 文件
+            # （2026-11-27 外部验收回测发现，regress_chunker 抓的）。
+            first_unit = s
 
     if not items:
         # 没有任何函数 / 类 / export 可切：例如只声明常量的模块，
@@ -263,7 +272,8 @@ def collect_items(src_text: str, max_lines: int = DEFAULT_MAX_LINES):
             items.append((s0, e0, "top", None))
     if not items:
         return [], len(src_text.splitlines())
-    preamble_end = min(it[0] for it in items) - 1
+    preamble_end = (first_unit if first_unit is not None
+                    else min(it[0] for it in items)) - 1
     return items, preamble_end
 
 
