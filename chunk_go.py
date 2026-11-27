@@ -259,7 +259,8 @@ def main(argv=None) -> int:
               "拒绝清空。确认要覆盖请加 --force。", file=sys.stderr)
         return 2
 
-    src_text = src.read_text(encoding="utf-8")
+    # 同其他分段器：带 BOM 的 .go 读进来就剥掉，块体里不留 U+FEFF。
+    src_text = src.read_text(encoding="utf-8-sig")
     if has_error(parse_go(src_text).root_node):
         print("源文件本身解析就有 ERROR 节点，先修语法再切", file=sys.stderr)
         return 2

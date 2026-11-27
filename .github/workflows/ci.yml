@@ -33,6 +33,11 @@ jobs:
       - name: JS 分段器自测
         run: python tests/selftest_js.py chunk_js.py
 
+      # 输入变体：BOM / CRLF / 无尾换行 × 六种语言（运行时生成，不存二进制夹具）。
+      # 2026-11-27 抽查发现这条路一直是「碰巧能过」，Python + BOM 当场就挂。
+      - name: 输入编码与换行变体
+        run: python tests/test_input_encodings.py
+
       # --post 的字段契约走真实 CLI 子进程（假引擎），不需要私有引擎。
       - name: --post 字段契约
         run: python tests/test_post_contract.py

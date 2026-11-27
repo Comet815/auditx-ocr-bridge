@@ -140,7 +140,9 @@ def main(argv=None) -> int:
             if not (man.get("chunker") or {}).get("name"):
                 fails.append(f"{f.name}: manifest 缺 chunker.name")
 
-            src_lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+            # utf-8-sig：带 BOM 的源文件，块体里不含 BOM（分段器读的时候剥掉了），
+            # 这里也要剥，否则第 1 行会因为 U+FEFF 永远比对不上。
+            src_lines = f.read_text(encoding="utf-8-sig", errors="replace").splitlines()
             chunks = man.get("chunks") or []
             if not chunks:
                 fails.append(f"{f.name}: 一块都没切出来")

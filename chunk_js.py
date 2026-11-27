@@ -381,7 +381,10 @@ def main(argv=None) -> int:
               "拒绝清空。确认要覆盖请加 --force。", file=sys.stderr)
         return 2
 
-    src_text = src.read_text(encoding="utf-8")
+    # utf-8-sig：源文件带 BOM 时读进来就剥掉。不剥的话 BOM 会跟进块体（
+    # 只有含第 1 行的那块有，其余块没有），六种语言行为还不一致——
+    # 2026-11-27 实测：Python 因 ast.parse 直接报错，TS 则是 BOM 混进块体。
+    src_text = src.read_text(encoding="utf-8-sig")
     if has_error(parse_js(src_text).root_node):
         print("源文件本身解析就有 ERROR 节点，先修语法再切", file=sys.stderr)
         return 2

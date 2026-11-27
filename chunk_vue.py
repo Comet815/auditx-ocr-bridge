@@ -153,7 +153,8 @@ def main(argv=None) -> int:
               "拒绝清空。确认要覆盖请加 --force。", file=sys.stderr)
         return 2
 
-    vue_text = src.read_text(encoding="utf-8")
+    # 同其他分段器：带 BOM 的 .vue 读进来就剥掉，块体里不留 U+FEFF。
+    vue_text = src.read_text(encoding="utf-8-sig")
     vue_lines = vue_text.splitlines()
     try:
         blocks = extract_script_blocks(vue_text)
